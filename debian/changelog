@@ -1,3 +1,11 @@
+rocm-rocprim (6.2.4-2) unstable; urgency=medium
+
+  * Release 6.2.4-2
+    * update deps
+    * change package name
+
+ --  <chenxuan@iscas.ac.cn>  Wed, 11 Jun 2025 15:48:59 +0800
+
 rocm-rocprim (6.2.4-1) unstable; urgency=medium
 
   * Initial release.

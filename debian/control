@@ -7,30 +7,25 @@ Build-Depends:
  debhelper-compat (= 13),
  cmake,
  pkg-config,
- rocm-env,
  rocm-cmake,
+ rocm-core,
+ rocm-env,
  rocm-hip-on-rocclr-dev,
  rocm-llvm,
-#  libedit-dev,
-#  libffi-dev,
-#  libglvnd-dev,
-#  libnuma-dev,
-#  libxml2-dev,
-#  libzstd-dev,
-#  python3-sphinx,
-#  terminfo,
-#  zlib1g-dev,
 Standards-Version: 4.7.0
 Homepage: https://github.com/ROCm/rocPRIM
 Vcs-Browser: https://github.com/r-rocm/rocm-rocprim
 Vcs-Git: https://github.com/r-rocm/rocm-rocprim.git
 
-Package: rocm-rocprim-dev
+Package: rocm-rocprim
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- rocm-hip-on-rocclr-dev,
+ rocm-cmake,
+ rocm-core,
+ rocm-env,
+ rocm-hip-on-rocclr,
  rocm-cmake,
  rocm-env,
 Description: ROCm Parallel Primitives - Development files
@@ -38,13 +33,13 @@ Description: ROCm Parallel Primitives - Development files
  can use this library to develop performant GPU-accelerated code on AMD ROCm
  platforms.
 
-Package: rocm-rocprim-doc
+Package: rocm-rocprim-dev
 Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
-Description: ROCm Parallel Primitives - Document files
+ rocm-hip-on-rocclr-dev,
+Description: ROCm Parallel Primitives - Development files
  rocPRIM is a header-only library that provides HIP parallel primitives. You
  can use this library to develop performant GPU-accelerated code on AMD ROCm
  platforms.
-
