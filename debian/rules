@@ -6,7 +6,7 @@ CFLAGS_BUILDING := -O2
 export DEB_CFLAGS_MAINT_APPEND = $(CFLAGS_BUILDING)
 export DEB_CXXFLAGS_MAINT_APPEND = $(CFLAGS_BUILDING)
 
-PKG_NAME=rocm-prim-dev
+PKG_NAME=rocm-rocprim-dev
 
 # ROCM_VERSION=$(DEB_VERSION_UPSTREAM) // cannot be used in debuild
 ROCM_VERSION=$(shell cat /opt/REVYOS_ROCM_VERSION)
