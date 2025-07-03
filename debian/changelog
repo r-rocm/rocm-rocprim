@@ -1,3 +1,9 @@
+rocm-rocprim (6.2.4-3) unstable; urgency=medium
+
+  * add more gpu targets
+
+ --  <chenxuan@iscas.ac.cn>  Thu, 03 Jul 2025 16:42:42 +0800
+
 rocm-rocprim (6.2.4-2) unstable; urgency=medium
 
   * Release 6.2.4-2
