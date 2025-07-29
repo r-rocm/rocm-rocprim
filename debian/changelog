@@ -1,3 +1,9 @@
+rocm-rocprim (6.4.2-1) trixie; urgency=medium
+
+  * Release 6.4.2-1
+
+ --  <chenxuan@iscas.ac.cn>  Tue, 29 Jul 2025 10:12:25 +0800
+
 rocm-rocprim (6.2.4-5) unstable; urgency=medium
 
   * Rebuild with new Trixie base.
