@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2021 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -47,13 +47,22 @@ BEGIN_ROCPRIM_NAMESPACE
 /// \par Overview
 /// * \p WarpSize must be power of two.
 /// * \p WarpSize must be equal to or less than the size of hardware warp (see
-/// rocprim::device_warp_size()). If it is less, sort is performed separately within groups
+/// rocprim::arch::wavefront::min_size()). If it is less, sort is performed separately within groups
 /// determined by WarpSize.
 /// For example, if \p WarpSize is 4, hardware warp is 64, sort will be performed in logical
 /// warps grouped like this: `{ {0, 1, 2, 3}, {4, 5, 6, 7 }, ..., {60, 61, 62, 63} }`
 /// (thread is represented here by its id within hardware warp).
 /// * Accepts custom compare_functions for sorting across a warp.
 /// * Number of threads executing warp_sort's function must be a multiple of \p WarpSize.
+///
+/// \par Stability
+/// \p warp_sort is <b>not stable</b>: it doesn't necessarily preserve the relative ordering
+/// of equivalent keys.
+/// That is, given two keys \p a and \p b and a binary boolean operation \p op such that:
+///   * \p a precedes \p b in the input keys, and
+///   * op(a, b) and op(b, a) are both false,
+/// then it is <b>not guaranteed</b> that \p a will precede \p b as well in the output
+/// (ordered) keys.
 ///
 /// \par Example:
 /// \parblock
@@ -93,7 +102,7 @@ BEGIN_ROCPRIM_NAMESPACE
 /// \endparblock
 template<
     class Key,
-    unsigned int WarpSize = device_warp_size(),
+    unsigned int WarpSize = arch::wavefront::min_size(),
     class Value = empty_type
 >
 class warp_sort : detail::warp_sort_shuffle<Key, WarpSize, Value>
@@ -125,10 +134,9 @@ public:
     /// <tt>bool f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& thread_key,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key&           thread_key,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(thread_key, compare_function);
     }
@@ -136,10 +144,9 @@ public:
     /// \brief Warp sort for any data type.
     /// Invalid Warp Size
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key&,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) compare_function; // disables unused parameter warning
         ROCPRIM_PRINT_ERROR_ONCE("Specified warp size exceeds current hardware supported warp size. Aborting warp sort.");
@@ -156,30 +163,24 @@ public:
     /// The signature of the function should be equivalent to the following:
     /// <tt>bool f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(thread_keys, compare_function);
     }
 
     /// \brief Warp sort for any data type.
     /// Invalid Warp Size
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) thread_keys;      // disables unused parameter warning
         (void) compare_function; // disables unused parameter warning
@@ -216,11 +217,10 @@ public:
     /// }
     /// \endcode
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& thread_key,
-              storage_type& storage,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key&           thread_key,
+                                            storage_type&  storage,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_key, storage, compare_function
@@ -230,11 +230,9 @@ public:
     /// \brief Warp sort for any data type using temporary storage.
     /// Invalid Warp Size
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& ,
-              storage_type& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto
+        sort(Key&, storage_type&, BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) compare_function; // disables unused parameter warning
         ROCPRIM_PRINT_ERROR_ONCE("Specified warp size exceeds current hardware supported warp size. Aborting warp sort.");
@@ -270,16 +268,13 @@ public:
     ///     ...
     /// }
     /// \endcode
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              storage_type& storage,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            storage_type&  storage,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_keys, storage, compare_function
@@ -288,16 +283,13 @@ public:
 
     /// \brief Warp sort for any data type using temporary storage.
     /// Invalid Warp Size
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              storage_type& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            storage_type&,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) thread_keys;      // disables unused parameter warning
         (void) compare_function; // disables unused parameter warning
@@ -317,11 +309,10 @@ public:
     /// <tt>bool f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& thread_key,
-              Value& thread_value,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key&           thread_key,
+                                            Value&         thread_value,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_key, thread_value, compare_function
@@ -331,11 +322,9 @@ public:
     /// \brief Warp sort by key for any data type.
     /// Invalid Warp Size
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& ,
-              Value& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto
+        sort(Key&, Value&, BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) compare_function; // disables unused parameter warning
         ROCPRIM_PRINT_ERROR_ONCE("Specified warp size exceeds current hardware supported warp size. Aborting warp sort.");
@@ -353,16 +342,13 @@ public:
     /// The signature of the function should be equivalent to the following:
     /// <tt>bool f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              Value (&thread_values)[ItemsPerThread],
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            Value (&thread_values)[ItemsPerThread],
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_keys, thread_values, compare_function
@@ -371,16 +357,13 @@ public:
 
     /// \brief Warp sort by key for any data type.
     /// Invalid Warp Size
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              Value (&thread_values)[ItemsPerThread],
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            Value (&thread_values)[ItemsPerThread],
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) thread_keys;      // disables unused parameter warning
         (void) thread_values;    // disables unused parameter warning
@@ -419,12 +402,11 @@ public:
     /// }
     /// \endcode
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& thread_key,
-              Value& thread_value,
-              storage_type& storage,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key&           thread_key,
+                                            Value&         thread_value,
+                                            storage_type&  storage,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_key, thread_value, storage, compare_function
@@ -434,12 +416,9 @@ public:
     /// \brief Warp sort by key for any data type using temporary storage.
     /// Invalid Warp Size
     template<class BinaryFunction = ::rocprim::less<Key>, unsigned int FunctionWarpSize = WarpSize>
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key& ,
-              Value& ,
-              storage_type& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto
+        sort(Key&, Value&, storage_type&, BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) compare_function; // disables unused parameter warning
         ROCPRIM_PRINT_ERROR_ONCE("Specified warp size exceeds current hardware supported warp size. Aborting warp sort.");
@@ -476,17 +455,14 @@ public:
     ///     ...
     /// }
     /// \endcode
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              Value (&thread_values)[ItemsPerThread],
-              storage_type& storage,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize <= __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            Value (&thread_values)[ItemsPerThread],
+                                            storage_type&  storage,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize <= arch::wavefront::min_size()), void>::type
     {
         base_type::sort(
             thread_keys, thread_values, storage, compare_function
@@ -495,17 +471,14 @@ public:
 
     /// \brief Warp sort by key for any data type using temporary storage.
     /// Invalid Warp Size
-    template<
-        unsigned int ItemsPerThread,
-        class BinaryFunction = ::rocprim::less<Key>,
-        unsigned int FunctionWarpSize = WarpSize
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    auto sort(Key (&thread_keys)[ItemsPerThread],
-              Value (&thread_values)[ItemsPerThread],
-              storage_type& ,
-              BinaryFunction compare_function = BinaryFunction())
-        -> typename std::enable_if<(FunctionWarpSize > __AMDGCN_WAVEFRONT_SIZE), void>::type
+    template<unsigned int ItemsPerThread,
+             class BinaryFunction          = ::rocprim::less<Key>,
+             unsigned int FunctionWarpSize = WarpSize>
+    ROCPRIM_DEVICE ROCPRIM_INLINE auto sort(Key (&thread_keys)[ItemsPerThread],
+                                            Value (&thread_values)[ItemsPerThread],
+                                            storage_type&,
+                                            BinaryFunction compare_function = BinaryFunction()) ->
+        typename std::enable_if<(FunctionWarpSize > arch::wavefront::min_size()), void>::type
     {
         (void) thread_keys;      // disables unused parameter warning
         (void) thread_values;    // disables unused parameter warning

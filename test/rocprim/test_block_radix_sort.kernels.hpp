@@ -121,8 +121,8 @@ __global__ __launch_bounds__(BlockSize) void sort_key_value_kernel(key_type*   d
 
     rocprim::
         block_radix_sort<key_type, BlockSize, ItemsPerThread, value_type, 1, 1, RadixBitsPerPass>
-                                                                               bsort;
-    test_utils::select_decomposer_t<key_type>                                  decomposer{};
+                                              bsort;
+    test_utils::select_decomposer_t<key_type> decomposer{};
     if(to_striped)
     {
         if(descending)
@@ -153,7 +153,7 @@ __global__ __launch_bounds__(BlockSize) void sort_key_value_kernel(key_type*   d
     }
 }
 
-// Test for radix sort
+// Test for radix sort with keys only
 template<class Key,
          class Value,
          unsigned int Method,
@@ -185,6 +185,10 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
     const size_t size = items_per_block * 19;
     const size_t grid_size = size / items_per_block;
 
+    SCOPED_TRACE(testing::Message() << "with items_per_block = " << items_per_block);
+    SCOPED_TRACE(testing::Message() << "with size = " << size);
+    SCOPED_TRACE(testing::Message() << "with grid_size = " << grid_size);
+
     for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
@@ -194,18 +198,11 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
 
         // Generate data
         auto keys_output = std::make_unique<key_type[]>(size);
-        if(rocprim::is_floating_point<key_type>::value)
-        {
-            test_utils::generate_random_data_n(keys_output.get(), size, -100, +100, rng_engine);
-        }
-        else
-        {
-            test_utils::generate_random_data_n(keys_output.get(),
-                                               size,
-                                               test_utils::numeric_limits<key_type>::min(),
-                                               test_utils::numeric_limits<key_type>::max(),
-                                               rng_engine);
-        }
+        test_utils::generate_random_data_n(keys_output.get(),
+                                           size,
+                                           test_utils::generate_limits<key_type>::min(),
+                                           test_utils::generate_limits<key_type>::max(),
+                                           rng_engine);
 
         // Calculate expected results on host
         std::vector<key_type> expected(keys_output.get(), keys_output.get() + size);
@@ -252,6 +249,7 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
 
 }
 
+// Test for radix_sort with keys and values. Also ensures that (block) radix_sort is stable
 template<class Key,
          class Value,
          unsigned int Method,
@@ -286,6 +284,10 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
     const size_t size = items_per_block * 19;
     const size_t grid_size = size / items_per_block;
 
+    SCOPED_TRACE(testing::Message() << "with items_per_block = " << items_per_block);
+    SCOPED_TRACE(testing::Message() << "with size = " << size);
+    SCOPED_TRACE(testing::Message() << "with grid_size = " << grid_size);
+
     for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
     {
         seed_type seed_value = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -295,20 +297,14 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
 
         // Generate data
         auto keys_output = std::make_unique<key_type[]>(size);
-        if(rocprim::is_floating_point<key_type>::value)
-        {
-            test_utils::generate_random_data_n(keys_output.get(), size, -100, +100, rng_engine);
-        }
-        else
-        {
-            test_utils::generate_random_data_n(keys_output.get(),
-                                               size,
-                                               test_utils::numeric_limits<key_type>::min(),
-                                               test_utils::numeric_limits<key_type>::max(),
-                                               rng_engine);
-        }
+        test_utils::generate_random_data_n(keys_output.get(),
+                                           size,
+                                           test_utils::generate_limits<key_type>::min(),
+                                           test_utils::generate_limits<key_type>::max(),
+                                           rng_engine);
 
-        std::vector<value_type> values_output = test_utils::get_random_data<value_type>(size, 0, 100, seed_value);
+        std::vector<value_type> values_output(size);
+        std::iota(values_output.begin(), values_output.end(), 0u);
 
         using key_value = std::pair<key_type, value_type>;
 
@@ -395,46 +391,39 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
 }
 
 // Static for-loop
-template <
-    unsigned int First,
-    unsigned int Last,
-    class T,
-    class U,
-    int Method,
-    unsigned int BlockSize = 256U
->
+template<unsigned int First,
+         unsigned int Last,
+         class T,
+         class U,
+         int          Method,
+         unsigned int BlockSize = 256U>
 struct static_for
 {
     static constexpr unsigned int end = (end_radix[First] == 0) ? sizeof(T) * 8 : end_radix[First];
 
     static void run()
     {
-        test_block_radix_sort<T,
-                              U,
-                              Method,
-                              BlockSize,
-                              items_radix[First],
-                              bits_per_pass_radix[First],
-                              desc_radix[First],
-                              striped_radix[First],
-                              start_radix[First],
-                              end>();
+        {
+            SCOPED_TRACE(testing::Message() << "TestID = " << First);
+            test_block_radix_sort<T,
+                                  U,
+                                  Method,
+                                  BlockSize,
+                                  items_radix[First],
+                                  bits_per_pass_radix[First],
+                                  desc_radix[First],
+                                  striped_radix[First],
+                                  start_radix[First],
+                                  end>();
+        }
         static_for<First + 1, Last, T, U, Method, BlockSize>::run();
     }
 };
 
-template <
-    unsigned int N,
-    class T,
-    class U,
-    int Method,
-    unsigned int BlockSize
->
+template<unsigned int N, class T, class U, int Method, unsigned int BlockSize>
 struct static_for<N, N, T, U, Method, BlockSize>
 {
-    static void run()
-    {
-    }
+    static void run() {}
 };
 
 #endif // TEST_BLOCK_RADIX_SORT_KERNELS_HPP_

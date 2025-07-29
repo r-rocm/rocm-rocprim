@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,8 @@
 #ifndef ROCPRIM_DEVICE_DETAIL_DEVICE_REDUCE_BY_KEY_HPP_
 #define ROCPRIM_DEVICE_DETAIL_DEVICE_REDUCE_BY_KEY_HPP_
 
+#include "device_config_helper.hpp"
 #include "lookback_scan_state.hpp"
-#include "ordered_block_id.hpp"
 
 #include "../../block/block_discontinuity.hpp"
 #include "../../block/block_load.hpp"
@@ -33,8 +33,10 @@
 #include "../../thread/thread_operators.hpp"
 
 #include "../../config.hpp"
+#include "../../type_traits.hpp"
 
 #include <iterator>
+#include <type_traits>
 #include <utility>
 
 BEGIN_ROCPRIM_NAMESPACE
@@ -45,12 +47,10 @@ namespace detail
 namespace reduce_by_key
 {
 
-template<typename Iterator>
-using value_type_t = typename std::iterator_traits<Iterator>::value_type;
-
 template<typename ValueIterator, typename BinaryOp>
 using accumulator_type_t =
-    typename invoke_result_binary_op<reduce_by_key::value_type_t<ValueIterator>, BinaryOp>::type;
+    typename invoke_result_binary_op<::rocprim::detail::value_type_t<ValueIterator>,
+                                     BinaryOp>::type;
 
 template<typename AccumulatorType>
 using wrapped_type_t = rocprim::tuple<unsigned int, AccumulatorType>;
@@ -58,36 +58,6 @@ using wrapped_type_t = rocprim::tuple<unsigned int, AccumulatorType>;
 template<typename AccumulatorType, bool UseSleep = false>
 using lookback_scan_state_t
     = detail::lookback_scan_state<wrapped_type_t<AccumulatorType>, UseSleep>;
-
-template<typename EqualityOp>
-struct guarded_inequality_wrapper
-{
-    /// Wrapped equality operator
-    EqualityOp op;
-
-    /// Out-of-bounds limit
-    size_t guard;
-
-    /// Constructor
-    ROCPRIM_HOST_DEVICE inline guarded_inequality_wrapper(EqualityOp op, size_t guard)
-        : op(op), guard(guard)
-    {}
-
-    /// \brief Guarded boolean inequality operator.
-    ///
-    /// \tparam T Type of the operands compared by the equality operator
-    /// \param a Left hand-side operand
-    /// \param b Right hand-side operand
-    /// \param idx Index of the thread calling to this operator. This is used to determine which
-    /// operations are out-of-bounds
-    /// \returns <tt>!op(a, b)</tt> for a certain equality operator \p op when in-bounds.
-    template<typename T>
-    ROCPRIM_HOST_DEVICE inline bool operator()(const T& a, const T& b, size_t idx) const
-    {
-        // In-bounds return operation result, out-of-bounds return false.
-        return (idx < guard) ? !op(a, b) : 0;
-    }
-};
 
 template<typename KeyType,
          typename AccumulatorType,
@@ -100,6 +70,14 @@ struct load_helper
     using block_load_keys = block_load<KeyType, BlockSize, ItemsPerThread, load_keys_method>;
     using block_load_values
         = block_load<AccumulatorType, BlockSize, ItemsPerThread, load_values_method>;
+
+    /// We only need to sync between loading keys & values if BOTH the key and value
+    /// loading method require shared memory.
+    constexpr static bool requires_inner_sync
+        = !std::is_same<typename block_load_keys::storage_type, detail::empty_storage_type>::value
+          && !std::is_same<typename block_load_values::storage_type,
+                           detail::empty_storage_type>::value;
+
     union storage_type
     {
         typename block_load_keys::storage_type   keys;
@@ -115,16 +93,23 @@ struct load_helper
                                          AccumulatorType (&values)[ItemsPerThread],
                                          storage_type& storage)
     {
+
         if(!is_global_last_tile)
         {
             block_load_keys{}.load(tile_keys, keys, storage.keys);
-            ::rocprim::syncthreads();
+            if ROCPRIM_IF_CONSTEXPR(requires_inner_sync)
+            {
+                ::rocprim::syncthreads();
+            }
             block_load_values{}.load(tile_values, values, storage.values);
         }
         else
         {
             block_load_keys{}.load(tile_keys, keys, valid_in_global_last_tile, storage.keys);
-            ::rocprim::syncthreads();
+            if ROCPRIM_IF_CONSTEXPR(requires_inner_sync)
+            {
+                ::rocprim::syncthreads();
+            }
             block_load_values{}.load(tile_values,
                                      values,
                                      valid_in_global_last_tile,
@@ -153,7 +138,8 @@ struct discontinuity_helper
         {
             // If it's the last tile globally, the out-of-bound items should not be flagged.
             auto guarded_not_equal
-                = guarded_inequality_wrapper<CompareFunction>(compare, remaining);
+                = ::rocprim::detail::guarded_inequality_wrapper<CompareFunction>(compare,
+                                                                                 remaining);
 
             if(!is_global_first_tile)
             {
@@ -193,7 +179,9 @@ struct discontinuity_helper
 template<typename ValueType, unsigned int BlockSize, unsigned int ItemsPerThread>
 struct scatter_helper
 {
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
     using storage_type = detail::raw_storage<ValueType[BlockSize * ItemsPerThread]>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     template<typename ValueIterator, typename Flag, typename ValueFunction, typename IndexFunction>
     ROCPRIM_DEVICE void scatter(ValueIterator   tile_values,
@@ -237,11 +225,12 @@ struct scatter_helper
 
 template<typename KeyType,
          typename AccumulatorType,
-         unsigned int         BlockSize,
-         unsigned int         ItemsPerThread,
-         block_load_method    load_keys_method,
-         block_load_method    load_values_method,
-         block_scan_algorithm scan_algorithm>
+         unsigned int              BlockSize,
+         unsigned int              ItemsPerThread,
+         block_load_method         load_keys_method,
+         block_load_method         load_values_method,
+         block_scan_algorithm      scan_algorithm,
+         lookback_scan_determinism Determinism>
 class tile_helper
 {
 private:
@@ -390,11 +379,11 @@ public:
         }
         else
         {
-            auto lookback_op = detail::lookback_scan_prefix_op<wrapped_type,
-                                                               decltype(wrapped_op),
-                                                               decltype(scan_state)>{tile_id,
-                                                                                     wrapped_op,
-                                                                                     scan_state};
+            auto lookback_op
+                = detail::lookback_scan_prefix_op<wrapped_type,
+                                                  decltype(wrapped_op),
+                                                  decltype(scan_state),
+                                                  Determinism>{tile_id, wrapped_op, scan_state};
 
             auto offset_lookback_op = prefix_op_factory::create(lookback_op, storage.scan.prefix);
 
@@ -470,7 +459,8 @@ public:
     }
 };
 
-template<typename Config,
+template<lookback_scan_determinism Determinism,
+         typename Config,
          typename AccumulatorType,
          typename KeyIterator,
          typename ValueIterator,
@@ -480,7 +470,36 @@ template<typename Config,
          typename CompareFunction,
          typename BinaryOp,
          typename LookbackScanState>
-ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
+ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE auto kernel_impl(KeyIterator,
+                                                     ValueIterator,
+                                                     const UniqueIterator,
+                                                     const ReductionIterator,
+                                                     const UniqueCountIterator,
+                                                     const BinaryOp,
+                                                     const CompareFunction,
+                                                     const LookbackScanState,
+                                                     const std::size_t,
+                                                     const std::size_t,
+                                                     const std::size_t,
+                                                     const std::size_t* const,
+                                                     const AccumulatorType* const)
+    -> std::enable_if_t<!is_lookback_kernel_runnable<LookbackScanState>()>
+{
+    // No need to build the kernel with sleep on a device that does not require it
+}
+
+template<lookback_scan_determinism Determinism,
+         typename Config,
+         typename AccumulatorType,
+         typename KeyIterator,
+         typename ValueIterator,
+         typename UniqueIterator,
+         typename ReductionIterator,
+         typename UniqueCountIterator,
+         typename CompareFunction,
+         typename BinaryOp,
+         typename LookbackScanState>
+ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE auto
     kernel_impl(KeyIterator                    keys_input,
                 ValueIterator                  values_input,
                 const UniqueIterator           unique_keys,
@@ -489,23 +508,23 @@ ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
                 const BinaryOp                 reduce_op,
                 const CompareFunction          compare,
                 const LookbackScanState        scan_state,
-                ordered_block_id<unsigned int> ordered_tile_id,
-                const std::size_t              starting_tile,
-                const std::size_t              total_number_of_tiles,
+                const std::size_t              starting_block,
+                const std::size_t              total_number_of_blocks,
                 const std::size_t              size,
                 const std::size_t* const       global_head_count,
-                const AccumulatorType* const   previous_accumulated,
-                const std::size_t              number_of_tiles_launch)
+                const AccumulatorType* const   previous_accumulated)
+        -> std::enable_if_t<is_lookback_kernel_runnable<LookbackScanState>()>
 {
-    static constexpr unsigned int         block_size         = Config::block_size;
-    static constexpr unsigned int         items_per_thread   = Config::items_per_thread;
-    static constexpr unsigned int         tiles_per_block    = Config::tiles_per_block;
-    static constexpr block_load_method    load_keys_method   = Config::load_keys_method;
-    static constexpr block_load_method    load_values_method = Config::load_values_method;
-    static constexpr block_scan_algorithm scan_algorithm     = Config::scan_algorithm;
-    static constexpr unsigned int         items_per_tile     = block_size * items_per_thread;
+    static constexpr reduce_by_key_config_params params = device_params<Config>();
 
-    using key_type = reduce_by_key::value_type_t<KeyIterator>;
+    static constexpr unsigned int         block_size       = params.kernel_config.block_size;
+    static constexpr unsigned int         items_per_thread = params.kernel_config.items_per_thread;
+    static constexpr block_load_method    load_keys_method = params.load_keys_method;
+    static constexpr block_load_method    load_values_method = params.load_values_method;
+    static constexpr block_scan_algorithm scan_algorithm     = params.scan_algorithm;
+    static constexpr unsigned int         items_per_block    = block_size * items_per_thread;
+
+    using key_type = ::rocprim::detail::value_type_t<KeyIterator>;
 
     using tile_processor = tile_helper<key_type,
                                        AccumulatorType,
@@ -513,44 +532,34 @@ ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
                                        items_per_thread,
                                        load_keys_method,
                                        load_values_method,
-                                       scan_algorithm>;
+                                       scan_algorithm,
+                                       Determinism>;
 
     ROCPRIM_SHARED_MEMORY union
     {
-        typename decltype(ordered_tile_id)::storage_type tile_id;
-        typename tile_processor::storage_type            tile;
+        typename tile_processor::storage_type tile;
     } storage;
 
-    for(unsigned int i = 0; i < tiles_per_block; ++i)
-    {
-        rocprim::syncthreads();
-        const std::size_t tile_id = ordered_tile_id.get(threadIdx.x, storage.tile_id);
-        if(tile_id >= number_of_tiles_launch)
-        {
-            return;
-        }
+    const unsigned int  block_id     = rocprim::flat_block_id<block_size, 1, 1>();
+    const unsigned int  block_offset = block_id * items_per_block;
+    const KeyIterator   block_keys   = keys_input + block_offset;
+    const ValueIterator block_values = values_input + block_offset;
 
-        const std::size_t   tile_offset = tile_id * items_per_tile;
-        const KeyIterator   tile_keys   = keys_input + tile_offset;
-        const ValueIterator tile_values = values_input + tile_offset;
-
-        rocprim::syncthreads();
-        tile_processor{}.process_tile(tile_keys,
-                                      tile_values,
-                                      unique_keys,
-                                      reductions,
-                                      unique_count,
-                                      reduce_op,
-                                      compare,
-                                      scan_state,
-                                      tile_id,
-                                      starting_tile,
-                                      total_number_of_tiles,
-                                      size,
-                                      storage.tile,
-                                      global_head_count,
-                                      previous_accumulated);
-    }
+    tile_processor{}.process_tile(block_keys,
+                                  block_values,
+                                  unique_keys,
+                                  reductions,
+                                  unique_count,
+                                  reduce_op,
+                                  compare,
+                                  scan_state,
+                                  block_id,
+                                  starting_block,
+                                  total_number_of_blocks,
+                                  size,
+                                  storage.tile,
+                                  global_head_count,
+                                  previous_accumulated);
 }
 
 } // namespace reduce_by_key

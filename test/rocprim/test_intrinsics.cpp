@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -109,7 +109,10 @@ struct test_type_helper
     /// Initialize some random data for this type, of \p n elements and with random seed <tt>seed</tt>.
     static std::vector<T> get_random_data(size_t n, seed_type seed)
     {
-        return test_utils::get_random_data<T>(n, static_cast<T>(-100), static_cast<T>(100), seed);
+        return test_utils::get_random_data<T>(n,
+                                              test_utils::saturate_cast<T>(-100),
+                                              test_utils::saturate_cast<T>(100),
+                                              seed);
     }
 };
 
@@ -369,7 +372,7 @@ void test_shuffle()
         }
     }
 
-    hipFree(d_data);
+    HIP_CHECK(hipFree(d_data));
 }
 
 TYPED_TEST(RocprimIntrinsicsTests, ShuffleUp)
@@ -498,8 +501,8 @@ TYPED_TEST(RocprimIntrinsicsTests, ShuffleIndex)
                 ASSERT_EQ(output[j], expected[j]) << "where index = " << j;
             }
         }
-        hipFree(device_data);
-        hipFree(device_src_lanes);
+        HIP_CHECK(hipFree(device_data));
+        HIP_CHECK(hipFree(device_src_lanes));
     }
 }
 
@@ -552,7 +555,7 @@ TEST(RocprimIntrinsicsTests, LaneId)
         }
     }
 
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_output));
 }
 
 __global__ void masked_bit_count_kernel(unsigned int*             out,
@@ -561,7 +564,7 @@ __global__ void masked_bit_count_kernel(unsigned int*             out,
                                         const max_lane_mask_type  active_lanes)
 {
     const unsigned int out_index = blockIdx.x * blockDim.x + threadIdx.x;
-    const unsigned int in_index  = out_index / rocprim::warp_size();
+    const unsigned int in_index  = out_index / rocprim::arch::wavefront::min_size();
 
     const auto   value  = static_cast<rocprim::lane_mask_type>(in[in_index]);
     unsigned int result = test_type_helper<unsigned int>::uninitialized();
@@ -666,8 +669,8 @@ TEST(RocprimIntrinsicsTests, MaskedBitCount)
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
 }
 
 enum class warp_any_all_test_type
@@ -682,7 +685,8 @@ __global__ void warp_any_all_kernel(unsigned int*             out,
                                     max_lane_mask_type        active_lanes)
 {
     const unsigned int index     = blockIdx.x * blockDim.x + threadIdx.x;
-    const unsigned int predicate = (in[index / rocprim::warp_size()] >> rocprim::lane_id()) & 1;
+    const unsigned int predicate
+        = (in[index / rocprim::arch::wavefront::min_size()] >> rocprim::lane_id()) & 1;
 
     unsigned int result = test_type_helper<unsigned int>::uninitialized();
     if(is_lane_active(active_lanes, rocprim::lane_id()))
@@ -791,8 +795,8 @@ void warp_any_all_test()
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
 }
 
 TEST(RocprimIntrinsicsTests, WarpAny)
@@ -945,9 +949,9 @@ TYPED_TEST(RocprimIntrinsicsTests, WarpPermute)
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
-    hipFree(d_indices);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
+    HIP_CHECK(hipFree(d_indices));
 }
 
 template<unsigned int LabelBits>
@@ -1070,8 +1074,8 @@ TEST(RocprimIntrinsicsTests, MatchAny)
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
 }
 
 __global__ void
@@ -1168,8 +1172,8 @@ TEST(RocprimIntrinsicsTests, Ballot)
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
 }
 
 __global__ void group_elect_kernel(max_lane_mask_type* output,
@@ -1179,7 +1183,7 @@ __global__ void group_elect_kernel(max_lane_mask_type* output,
     const unsigned int input_index = blockIdx.x * blockDim.x + threadIdx.x;
 
     const unsigned int output_index
-        = blockIdx.x * warps_per_block + threadIdx.x / ::rocprim::device_warp_size();
+        = blockIdx.x * warps_per_block + threadIdx.x / ::rocprim::arch::wavefront::min_size();
 
     if(rocprim::group_elect(input[input_index]))
     {
@@ -1290,6 +1294,6 @@ TEST(RocprimIntrinsicsTests, GroupElect)
         }
     }
 
-    hipFree(d_input);
-    hipFree(d_output);
+    HIP_CHECK(hipFree(d_input));
+    HIP_CHECK(hipFree(d_output));
 }

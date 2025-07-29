@@ -45,7 +45,7 @@
 #include <cstdlib>
 
 #ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 128;
+const size_t DEFAULT_BYTES = 1024 * 1024 * 128 * 4;
 #endif
 
 namespace rp = rocprim;
@@ -222,22 +222,28 @@ struct subtract_right_partial
     }
 };
 
-template <class Benchmark,
-          class T,
-          unsigned int BlockSize,
-          unsigned int ItemsPerThread,
-          bool         WithTile,
-          unsigned int Trials = 100>
-auto run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
+template<class Benchmark,
+         class T,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         bool         WithTile,
+         unsigned int Trials = 100>
+auto run_benchmark(benchmark::State& state, size_t bytes, const managed_seed& seed, hipStream_t stream)
     -> std::enable_if_t<!std::is_same<Benchmark, subtract_left_partial>::value
                         && !std::is_same<Benchmark, subtract_right_partial>::value>
 {
+    // Calculate the number of elements N
+    size_t N = bytes / sizeof(T);
+    
     constexpr auto items_per_block = BlockSize * ItemsPerThread;
     const auto num_blocks = (N + items_per_block - 1) / items_per_block;
     // Round up size to the next multiple of items_per_block
     const auto size = num_blocks * items_per_block;
 
-    const std::vector<T> input = get_random_data<T>(size, T(0), T(10));
+    const auto           random_range = limit_random_range<T>(0, 10);
+    const std::vector<T> input
+        = get_random_data<T>(size, random_range.first, random_range.second, seed.get_0());
+
     T* d_input;
     T* d_output;
     HIP_CHECK(hipMalloc(&d_input, input.size() * sizeof(input[0])));
@@ -287,24 +293,35 @@ auto run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
     HIP_CHECK(hipFree(d_output));
 }
 
-template <class Benchmark,
-          class T,
-          unsigned int BlockSize,
-          unsigned int ItemsPerThread,
-          bool         WithTile,
-          unsigned int Trials = 100>
-auto run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
+template<class Benchmark,
+         class T,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         bool         WithTile,
+         unsigned int Trials = 100>
+auto run_benchmark(benchmark::State& state, size_t bytes, const managed_seed& seed, hipStream_t stream)
     -> std::enable_if_t<std::is_same<Benchmark, subtract_left_partial>::value
                         || std::is_same<Benchmark, subtract_right_partial>::value>
 {
+    // Calculate the number of elements N
+    size_t N = bytes / sizeof(T);
+
     static constexpr auto items_per_block = BlockSize * ItemsPerThread;
     const auto num_blocks = (N + items_per_block - 1) / items_per_block;
     // Round up size to the next multiple of items_per_block
     const auto size = num_blocks * items_per_block;
 
-    const std::vector<T> input = get_random_data<T>(size, T(0), T(10));
+    const auto           random_range_input      = limit_random_range<T>(0, 10);
+    const auto           random_range_tile_sizes = limit_random_range<T>(0, items_per_block);
+    const std::vector<T> input                   = get_random_data<T>(size,
+                                                    random_range_input.first,
+                                                    random_range_input.second,
+                                                    seed.get_0());
     const std::vector<unsigned int> tile_sizes
-        = get_random_data<unsigned int>(num_blocks, 0, items_per_block);
+        = get_random_data<unsigned int>(num_blocks,
+                                        random_range_tile_sizes.first,
+                                        random_range_tile_sizes.second,
+                                        seed.get_1());
 
     T*            d_input;
     unsigned int* d_tile_sizes;
@@ -372,8 +389,9 @@ auto run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
                                     ",with_tile:" #WITH_TILE "}}")                      \
             .c_str(),                                                                   \
         run_benchmark<Benchmark, T, BS, IPT, WITH_TILE>,                                \
-        stream,                                                                         \
-        size)
+        bytes,                                                                           \
+        seed,                                                                           \
+        stream)
 
 #define BENCHMARK_TYPE(type, block, with_tile)    \
     CREATE_BENCHMARK(type, block, 1,  with_tile), \
@@ -383,12 +401,12 @@ auto run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
     CREATE_BENCHMARK(type, block, 16, with_tile), \
     CREATE_BENCHMARK(type, block, 32, with_tile)
 
-
 template<class Benchmark>
-void add_benchmarks(const std::string& name,
+void add_benchmarks(const std::string&                            name,
                     std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                    hipStream_t stream,
-                    size_t size)
+                    size_t                                        bytes,
+                    const managed_seed&                           seed,
+                    hipStream_t                                   stream)
 {
     std::vector<benchmark::internal::Benchmark*> bs =
     {
@@ -417,33 +435,41 @@ void add_benchmarks(const std::string& name,
 int main(int argc, char *argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
     parser.run_and_exit_if_error();
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size = parser.get<size_t>("size");
+    const size_t bytes = parser.get<size_t>("size");
     const int trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     // Add benchmarks
     std::vector<benchmark::internal::Benchmark*> benchmarks;
-    add_benchmarks<subtract_left>("subtract_left", benchmarks, stream, size);
-    add_benchmarks<subtract_right>("subtract_right", benchmarks, stream, size);
-    add_benchmarks<subtract_left_partial>("subtract_left_partial", benchmarks, stream, size);
-    add_benchmarks<subtract_right_partial>("subtract_right_partial", benchmarks, stream, size);
+    add_benchmarks<subtract_left>("subtract_left", benchmarks, bytes, seed, stream);
+    add_benchmarks<subtract_right>("subtract_right", benchmarks, bytes, seed, stream);
+    add_benchmarks<subtract_left_partial>("subtract_left_partial", benchmarks, bytes, seed, stream);
+    add_benchmarks<subtract_right_partial>("subtract_right_partial",
+                                           benchmarks,
+                                           bytes,
+                                           seed,
+                                           stream);
 
     // Use manual timing
     for(auto& b : benchmarks)

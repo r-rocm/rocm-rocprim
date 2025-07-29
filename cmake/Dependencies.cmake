@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -57,49 +57,9 @@ list(JOIN CXX_FLAGS_LIST " " CMAKE_CXX_FLAGS)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Global flag to cause add_library() to create shared libraries if on." FORCE)
 
 # HIP dependency is handled earlier in the project cmake file
-# when VerifyCompiler.cmake is included (when not using HIP-CPU).
+# when VerifyCompiler.cmake is included.
 
 include(FetchContent)
-
-if(USE_HIP_CPU)
-  if(NOT DEPENDENCIES_FORCE_DOWNLOAD)
-    find_package(hip_cpu_rt QUIET)
-  endif()
-  if(NOT TARGET hip_cpu_rt::hip_cpu_rt)
-    message(STATUS "HIP-CPU runtime not found. Fetching...")
-    FetchContent_Declare(
-      hip-cpu
-      GIT_REPOSITORY https://github.com/ROCm-Developer-Tools/HIP-CPU.git
-      GIT_TAG        56f559c93be210bb300dad3673c06d2bb0119d13 # master@2022.07.01
-    )
-    FetchContent_MakeAvailable(hip-cpu)
-    if(NOT TARGET hip_cpu_rt::hip_cpu_rt)
-      add_library(hip_cpu_rt::hip_cpu_rt ALIAS hip_cpu_rt)
-    endif()
-  else()
-    find_package(hip_cpu_rt REQUIRED)
-    # If we found HIP-CPU as binary, search for transitive dependencies
-    find_package(Threads REQUIRED)
-    set(CMAKE_REQUIRED_FLAGS "-std=c++17")
-    include(CheckCXXSymbolExists)
-    check_cxx_symbol_exists(__GLIBCXX__ "cstddef" STL_IS_GLIBCXX)
-    set(STL_DEPENDS_ON_TBB ${STL_IS_GLIBCXX})
-    if(STL_DEPENDS_ON_TBB)
-      find_package(TBB QUIET)
-      if(NOT TARGET TBB::tbb AND NOT TARGET tbb)
-        message(STATUS "Thread Building Blocks not found. Fetching...")
-        FetchContent_Declare(
-          thread-building-blocks
-          GIT_REPOSITORY https://github.com/oneapi-src/oneTBB.git
-          GIT_TAG        3df08fe234f23e732a122809b40eb129ae22733f # v2021.5.0
-        )
-        FetchContent_MakeAvailable(thread-building-blocks)
-      else()
-        find_package(TBB REQUIRED)
-      endif()
-    endif(STL_DEPENDS_ON_TBB)
-  endif()
-endif(USE_HIP_CPU)
 
 # Test dependencies
 if(BUILD_TEST)
@@ -175,7 +135,7 @@ if(BUILD_BENCHMARK)
 endif(BUILD_BENCHMARK)
 
 if(NOT DEPENDENCIES_FORCE_DOWNLOAD)
-  find_package(ROCM 0.7.3 CONFIG QUIET PATHS "${ROCM_ROOT}")
+  find_package(ROCM 0.11.0 CONFIG QUIET PATHS "${ROCM_ROOT}") # rocm-cmake
 endif()
 if(NOT ROCM_FOUND)
   message(STATUS "ROCm CMake not found. Fetching...")
@@ -189,13 +149,28 @@ if(NOT ROCM_FOUND)
   set(rocm_cmake_tag "master" CACHE STRING "rocm-cmake tag to download")
   FetchContent_Declare(
     rocm-cmake
-    URL  https://github.com/RadeonOpenCompute/rocm-cmake/archive/${rocm_cmake_tag}.tar.gz
+    GIT_REPOSITORY https://github.com/ROCm/rocm-cmake.git
+    GIT_TAG        rocm-6.1.2
     ${SOURCE_SUBDIR_ARG}
   )
+  FetchContent_GetProperties(rocm-cmake)
+  if(NOT rocm-cmake_POPULATED)
+    # rocm-cmake 0.12.0 and higher needs to built from source
+    FetchContent_Populate(rocm-cmake)
+    message("Populated: ${rocm-cmake_SOURCE_DIR}")
+    execute_process(
+      WORKING_DIRECTORY ${rocm-cmake_SOURCE_DIR}
+      COMMAND ${CMAKE_COMMAND} ${rocm-cmake_SOURCE_DIR} -DCMAKE_INSTALL_PREFIX=.
+    )
+    execute_process(
+      WORKING_DIRECTORY ${rocm-cmake_SOURCE_DIR}
+      COMMAND ${CMAKE_COMMAND} --build ${rocm-cmake_SOURCE_DIR} --target install
+    )
+  endif()
   FetchContent_MakeAvailable(rocm-cmake)
   find_package(ROCM CONFIG REQUIRED NO_DEFAULT_PATH PATHS "${rocm-cmake_SOURCE_DIR}")
 else()
-  find_package(ROCM 0.7.3 CONFIG REQUIRED PATHS "${ROCM_ROOT}")
+  find_package(ROCM 0.11.0 CONFIG REQUIRED PATHS "${ROCM_ROOT}")
 endif()
 
 # Restore user global state
@@ -215,3 +190,6 @@ include(ROCMInstallSymlinks)
 include(ROCMHeaderWrapper)
 include(ROCMCheckTargetIds)
 include(ROCMClients)
+if(BUILD_DOCS)
+  include(ROCMSphinxDoc)
+endif()

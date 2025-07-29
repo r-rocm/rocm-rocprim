@@ -26,21 +26,26 @@
 #include <rocprim/device/device_run_length_encode.hpp>
 
 // required test headers
+#include "rocprim/block/block_load.hpp"
+#include "rocprim/block/block_scan.hpp"
+#include "rocprim/device/detail/lookback_scan_state.hpp"
 #include "rocprim/types.hpp"
 #include "test_utils_types.hpp"
 
-template<
-    class Key,
-    class Count,
-    unsigned int MinSegmentLength,
-    unsigned int MaxSegmentLength,
-    // Tests output iterator with void value_type (OutputIterator concept)
-    bool UseIdentityIterator = false
->
+template<class Key,
+         class Count,
+         unsigned int MinSegmentLength,
+         unsigned int MaxSegmentLength,
+         // Tests output iterator with void value_type (OutputIterator concept)
+         bool UseIdentityIterator = false,
+         class Config             = rocprim::default_config,
+         class NonTrivialConfig   = rocprim::default_config>
 struct params
 {
     using key_type = Key;
     using count_type = Count;
+    using config                                        = Config;
+    using non_trivial_config                            = NonTrivialConfig;
     static constexpr unsigned int min_segment_length = MinSegmentLength;
     static constexpr unsigned int max_segment_length = MaxSegmentLength;
     static constexpr bool use_identity_iterator = UseIdentityIterator;
@@ -56,29 +61,43 @@ using custom_int2 = test_utils::custom_test_type<int>;
 using custom_double2 = test_utils::custom_test_type<double>;
 
 typedef ::testing::Types<
-    params<int, int, 1, 1, true>,
-    params<double, int, 3, 5>,
-    params<float, int, 1, 10>,
-    params<unsigned long long, size_t, 1, 30>,
-    params<custom_int2, unsigned int, 20, 100>,
-    params<float, unsigned long long, 100, 400>,
-    params<unsigned int, unsigned int, 200, 600>,
-    params<double, int, 100, 2000>,
-    params<custom_double2, custom_int2, 10, 30000, true>,
-    params<int, unsigned int, 1000, 5000>,
+    // Tests with default configuration
     params<int8_t, int8_t, 100, 2000>,
     params<uint8_t, uint8_t, 100, 2000>,
+    params<int8_t, int8_t, 1000, 5000>,
+    params<uint8_t, uint8_t, 1000, 5000>,
+    params<int, unsigned int, 1000, 5000>,
+    params<unsigned int, size_t, 2048, 2048>,
+    params<unsigned int, unsigned int, 1000, 50000>,
+    params<unsigned long long, size_t, 1, 30>,
+    params<float, unsigned long long, 100, 400>,
+    params<float, int, 1, 10>,
+    params<double, int, 3, 5>,
+    params<double, int, 100, 2000>,
     params<int, rocprim::half, 100, 2000>,
     // half should be supported, but is missing some key operators.
     // we should uncomment these, as soon as these are implemented and the tests compile and work as intended.
     //params<rocprim::half, int, 100, 2000>,
-    params<int8_t, int8_t, 1000, 5000>,
-    params<uint8_t, uint8_t, 1000, 5000>,
     params<int, rocprim::bfloat16, 1000, 5000>,
     params<rocprim::bfloat16, int, 1000, 5000>,
-    params<unsigned int, size_t, 2048, 2048>,
-    params<unsigned int, unsigned int, 1000, 50000>,
-    params<unsigned long long, custom_double2, 100000, 100000>>
+    // Tests for custom types
+    params<custom_int2, unsigned int, 20, 100>,
+    params<custom_double2, custom_int2, 10, 30000, true>,
+    params<unsigned long long, custom_double2, 100000, 100000>,
+    // Tests for supported config structs
+    params<unsigned int,
+           unsigned int,
+           200,
+           600,
+           false,
+           // RLE config
+           rocprim::run_length_encode_config<rocprim::reduce_by_key_config<128, 5>,
+                                             rocprim::select_config<64, 3>>,
+           // RLE non-trivial config
+           rocprim::run_length_encode_config<rocprim::reduce_by_key_config<256, 15>,
+                                             rocprim::select_config<256, 13>>>,
+    // Tests for when output's value_type is void
+    params<int, int, 1, 1, true>>
     Params;
 
 TYPED_TEST_SUITE(RocprimDeviceRunLengthEncode, Params);
@@ -104,6 +123,7 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, Encode)
 
     using key_type = typename TestFixture::params::key_type;
     using count_type = typename TestFixture::params::count_type;
+    using config     = typename TestFixture::params::config;
 
     constexpr bool use_identity_iterator = TestFixture::params::use_identity_iterator;
     const bool debug_synchronous = false;
@@ -122,6 +142,9 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, Encode)
             SCOPED_TRACE(testing::Message() << "with size = " << size);
 
             hipStream_t stream = 0; // default
+
+            // Default stream does not support hipGraph stream capture, so create one
+            HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
             // Generate data and calculate expected results
             std::vector<key_type> unique_expected;
@@ -176,38 +199,47 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, Encode)
 
             size_t temporary_storage_bytes = 0;
 
-            HIP_CHECK(
-                rocprim::run_length_encode(
-                    nullptr, temporary_storage_bytes,
-                    d_input, size,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_unique_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
-                    stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::run_length_encode<config>(
+                nullptr,
+                temporary_storage_bytes,
+                d_input,
+                size,
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_unique_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
+                stream,
+                debug_synchronous));
 
             ASSERT_GT(temporary_storage_bytes, 0U);
 
             void * d_temporary_storage;
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temporary_storage, temporary_storage_bytes));
+            HIP_CHECK(hipDeviceSynchronize());
 
-            HIP_CHECK(
-                rocprim::run_length_encode(
-                    d_temporary_storage, temporary_storage_bytes,
-                    d_input, size,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_unique_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
-                    stream, debug_synchronous
-                )
-            );
+            test_utils::GraphHelper gHelper;
+            gHelper.startStreamCapture(stream);
+
+            HIP_CHECK(rocprim::run_length_encode<config>(
+                d_temporary_storage,
+                temporary_storage_bytes,
+                d_input,
+                size,
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_unique_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
+                stream,
+                debug_synchronous));
+
+            gHelper.createAndLaunchGraph(stream);
+
+            HIP_CHECK(hipDeviceSynchronize());
 
             HIP_CHECK(hipFree(d_temporary_storage));
 
             std::vector<key_type> unique_output(runs_count_expected);
             std::vector<count_type> counts_output(runs_count_expected);
             std::vector<count_type> runs_count_output(1);
+
             HIP_CHECK(
                 hipMemcpy(
                     unique_output.data(), d_unique_output,
@@ -235,6 +267,9 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, Encode)
             HIP_CHECK(hipFree(d_counts_output));
             HIP_CHECK(hipFree(d_runs_count_output));
 
+            gHelper.cleanupGraphHelper();
+            HIP_CHECK(hipStreamDestroy(stream));
+
             // Validating results
 
             std::vector<count_type> runs_count_expected_2;
@@ -257,8 +292,10 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, NonTrivialRuns)
     using key_type = typename TestFixture::params::key_type;
     using count_type = typename TestFixture::params::count_type;
     using offset_type = typename TestFixture::params::count_type;
+    using config      = typename TestFixture::params::non_trivial_config;
 
     constexpr bool use_identity_iterator = TestFixture::params::use_identity_iterator;
+
     const bool debug_synchronous = false;
 
     const unsigned int seed = 123;
@@ -276,6 +313,9 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, NonTrivialRuns)
 
             hipStream_t stream = 0; // default
 
+            // Default stream does not support hipGraph stream capture, so create one
+            HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
+
             // Generate data and calculate expected results
             std::vector<offset_type> offsets_expected;
             std::vector<count_type> counts_expected;
@@ -287,7 +327,6 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, NonTrivialRuns)
                 TestFixture::params::max_segment_length
             );
             std::bernoulli_distribution is_trivial_dis(0.1);
-            std::vector<count_type> values_input = test_utils::get_random_data<count_type>(size, 0, 100, seed_value);
 
             size_t offset = 0;
             key_type current_key = get_random_value_no_duplicate(key_type(0), random_keys, size);
@@ -342,38 +381,47 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, NonTrivialRuns)
 
             size_t temporary_storage_bytes = 0;
 
-            HIP_CHECK(
-                rocprim::run_length_encode_non_trivial_runs(
-                    nullptr, temporary_storage_bytes,
-                    d_input, size,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_offsets_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
-                    stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::run_length_encode_non_trivial_runs<config>(
+                nullptr,
+                temporary_storage_bytes,
+                d_input,
+                size,
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_offsets_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
+                stream,
+                debug_synchronous));
 
             ASSERT_GT(temporary_storage_bytes, 0U);
 
             void * d_temporary_storage;
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temporary_storage, temporary_storage_bytes));
+            HIP_CHECK(hipDeviceSynchronize());
 
-            HIP_CHECK(
-                rocprim::run_length_encode_non_trivial_runs(
-                    d_temporary_storage, temporary_storage_bytes,
-                    d_input, size,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_offsets_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
-                    stream, debug_synchronous
-                )
-            );
+            test_utils::GraphHelper gHelper;
+            gHelper.startStreamCapture(stream);
+
+            HIP_CHECK(rocprim::run_length_encode_non_trivial_runs<config>(
+                d_temporary_storage,
+                temporary_storage_bytes,
+                d_input,
+                size,
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_offsets_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_counts_output),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_runs_count_output),
+                stream,
+                debug_synchronous));
+
+            gHelper.createAndLaunchGraph(stream);
+
+            HIP_CHECK(hipDeviceSynchronize());
 
             HIP_CHECK(hipFree(d_temporary_storage));
 
             std::vector<offset_type> offsets_output(runs_count_expected);
             std::vector<count_type> counts_output(runs_count_expected);
             std::vector<count_type> runs_count_output(1);
+
             if(runs_count_expected > 0)
             {
                 HIP_CHECK(
@@ -404,14 +452,22 @@ TYPED_TEST(RocprimDeviceRunLengthEncode, NonTrivialRuns)
             HIP_CHECK(hipFree(d_counts_output));
             HIP_CHECK(hipFree(d_runs_count_output));
 
+            gHelper.cleanupGraphHelper();
+            HIP_CHECK(hipStreamDestroy(stream));
+
             // Validating results
 
             std::vector<count_type> runs_count_expected_2;
             runs_count_expected_2.push_back(static_cast<count_type>(runs_count_expected));
-            test_utils::assert_eq(runs_count_output, runs_count_expected_2, 1);
-
-            ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(offsets_output, offsets_expected, runs_count_expected));
-            ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(counts_output, counts_expected, runs_count_expected));
+            SCOPED_TRACE(testing::Message() << "runs_count_output");
+            ASSERT_NO_FATAL_FAILURE(
+                test_utils::assert_eq(runs_count_output, runs_count_expected_2, 1));
+            SCOPED_TRACE(testing::Message() << "offsets_output");
+            ASSERT_NO_FATAL_FAILURE(
+                test_utils::assert_eq(offsets_output, offsets_expected, runs_count_expected));
+            SCOPED_TRACE(testing::Message() << "counts_output");
+            ASSERT_NO_FATAL_FAILURE(
+                test_utils::assert_eq(counts_output, counts_expected, runs_count_expected));
         }
     }
 

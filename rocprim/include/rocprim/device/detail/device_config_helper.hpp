@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -35,6 +35,8 @@
 #include "rocprim/block/block_radix_rank.hpp"
 #include "rocprim/block/block_sort.hpp"
 
+#include "lookback_scan_state.hpp"
+
 /// \addtogroup primitivesmodule_deviceconfigs
 /// @{
 
@@ -51,7 +53,9 @@ struct merge_sort_block_sort_config_params
 
 // Necessary to construct a parameterized type of `merge_sort_block_sort_config_params`.
 // Used in passing to host-side sub-algorithms and GPU kernels so non-default parameters can be available during compile-time.
-template<unsigned int BlockSize, unsigned int ItemsPerThread, rocprim::block_sort_algorithm Algo>
+template<unsigned int                  BlockSize,
+         unsigned int                  ItemsPerThread,
+         rocprim::block_sort_algorithm Algo = block_sort_algorithm::stable_merge_sort>
 struct merge_sort_block_sort_config : rocprim::detail::merge_sort_block_sort_config_params
 {
     using sort_config = kernel_config<BlockSize, ItemsPerThread>;
@@ -69,8 +73,13 @@ constexpr unsigned int merge_sort_items_per_thread(const unsigned int item_scale
     {
         return 4;
     }
-    return 2;
+    else if(item_scale <= 256)
+    {
+        return 2;
+    }
+    return 1;
 }
+
 constexpr unsigned int merge_sort_block_size(const unsigned int item_scale)
 {
     if(item_scale <= 32)
@@ -463,6 +472,7 @@ struct segmented_radix_sort_config_params
     /// \brief Number of bits in long iterations.
     unsigned int long_radix_bits = 0;
     /// \brief Number of bits in short iterations.
+    /// \deprecated The short radix bits parameter is no longer used and will be removed in a future version.
     unsigned int short_radix_bits = 0;
     /// \brief If set to \p true, warp sort can be used to sort the small segments, even if no partitioning happens.
     bool enable_unpartitioned_warp_sort = true;
@@ -560,6 +570,7 @@ struct DisabledWarpSortConfig
 ///
 /// \tparam LongRadixBits - number of bits in long iterations.
 /// \tparam ShortRadixBits - number of bits in short iterations, must be equal to or less than `LongRadixBits`.
+/// Deprecated and no longer used.
 /// \tparam SortConfig - configuration of radix sort kernel. Must be `kernel_config`.
 /// \tparam WarpSortConfig - configuration of the warp sort that is used on the short segments.
 template<unsigned int LongRadixBits,
@@ -577,6 +588,7 @@ struct segmented_radix_sort_config : public detail::segmented_radix_sort_config_
     static constexpr unsigned int long_radix_bits = LongRadixBits;
 
     /// \brief Number of bits in short iterations.
+    /// \deprecated The short radix bits parameter is no longer used and will be removed in a future version.
     static constexpr unsigned int short_radix_bits = ShortRadixBits;
 
     /// \brief Number of threads in a block.
@@ -849,6 +861,504 @@ struct default_adjacent_difference_config_base
         ::rocprim::max(1u, 16u / item_scale),
         ::rocprim::block_load_method::block_load_transpose,
         ::rocprim::block_store_method::block_store_transpose>;
+};
+
+} // namespace detail
+
+namespace detail
+{
+
+struct partition_config_params
+{
+    kernel_config_params kernel_config;
+    block_load_method    key_block_load_method;
+    block_load_method    value_block_load_method;
+    block_load_method    flag_block_load_method;
+    block_scan_algorithm block_scan_method;
+};
+
+} // namespace detail
+
+/// \brief Configuration of device-level partition and select operation.
+///
+/// \tparam BlockSize - number of threads in a block.
+/// \tparam ItemsPerThread - number of items processed by each thread.
+/// \tparam KeyBlockLoadMethod - method for loading input keys.
+/// \tparam ValueBlockLoadMethod - method for loading input values.
+/// \tparam FlagBlockLoadMethod - method for loading flag values.
+/// \tparam BlockScanMethod - algorithm for block scan.
+/// \tparam SizeLimit - limit on the number of items for a single select kernel launch.
+template<unsigned int                 BlockSize,
+         unsigned int                 ItemsPerThread,
+         ::rocprim::block_load_method KeyBlockLoadMethod
+         = ::rocprim::block_load_method::block_load_transpose,
+         ::rocprim::block_load_method ValueBlockLoadMethod
+         = ::rocprim::block_load_method::block_load_transpose,
+         ::rocprim::block_load_method FlagBlockLoadMethod
+         = ::rocprim::block_load_method::block_load_transpose,
+         ::rocprim::block_scan_algorithm BlockScanMethod
+         = ::rocprim::block_scan_algorithm::using_warp_scan,
+         unsigned int SizeLimit = ROCPRIM_GRID_SIZE_LIMIT>
+struct select_config : public detail::partition_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    /// \brief Number of threads in a block.
+    static constexpr unsigned int block_size = BlockSize;
+    /// \brief Number of items processed by each thread.
+    static constexpr unsigned int items_per_thread = ItemsPerThread;
+    /// \brief Method for loading input keys.
+    static constexpr block_load_method key_block_load_method = KeyBlockLoadMethod;
+    /// \brief Method for loading input values.
+    static constexpr block_load_method value_block_load_method = ValueBlockLoadMethod;
+    /// \brief Method for loading flag values.
+    static constexpr block_load_method flag_block_load_method = FlagBlockLoadMethod;
+    /// \brief Algorithm for block scan.
+    static constexpr block_scan_algorithm block_scan_method = BlockScanMethod;
+    /// \brief Limit on the number of items for a single select kernel launch.
+    static constexpr unsigned int size_limit = SizeLimit;
+
+    constexpr select_config()
+        : detail::partition_config_params{
+            {BlockSize, ItemsPerThread, SizeLimit},
+            KeyBlockLoadMethod,
+            ValueBlockLoadMethod,
+            FlagBlockLoadMethod,
+            BlockScanMethod
+    } {};
+#endif
+};
+
+namespace detail
+{
+
+template<typename Key, bool IsThreeway, int ItemScaleBase = 13>
+struct default_partition_config_base
+{
+    static constexpr unsigned int item_scale
+        = ::rocprim::detail::ceiling_div<unsigned int>(sizeof(Key), sizeof(int));
+
+    using offset_t = std::conditional_t<IsThreeway, uint2, unsigned int>;
+
+    // Additional shared memory is required by the lookback scan state.
+    static constexpr unsigned int shared_mem_offset = sizeof(
+        typename offset_lookback_scan_prefix_op<offset_t,
+                                                lookback_scan_state<offset_t>>::storage_type);
+
+    using type = select_config<
+        limit_block_size<256U, sizeof(Key), ROCPRIM_WARP_SIZE_64, shared_mem_offset>::value,
+        ::rocprim::max(1u, ItemScaleBase / item_scale),
+        ::rocprim::block_load_method::block_load_transpose,
+        ::rocprim::block_load_method::block_load_transpose,
+        ::rocprim::block_load_method::block_load_transpose,
+        ::rocprim::block_scan_algorithm::using_warp_scan>;
+};
+
+struct reduce_by_key_config_params
+{
+    kernel_config_params kernel_config;
+    unsigned int         tiles_per_block;
+    block_load_method    load_keys_method;
+    block_load_method    load_values_method;
+    block_scan_algorithm scan_algorithm;
+};
+
+} // namespace detail
+
+/**
+ * \brief Configuration of device-level reduce-by-key operation.
+ *
+ * \tparam BlockSize number of threads in a block.
+ * \tparam ItemsPerThread number of items processed by each thread per tile.
+ * \tparam LoadKeysMethod method of loading keys
+ * \tparam LoadValuesMethod method of loading values
+ * \tparam ScanAlgorithm block level scan algorithm to use
+ * \tparam TilesPerBlock number of tiles (`BlockSize` * `ItemsPerThread` items) to process per block.
+ * This parameter is only here for legacy purposes. Its no longer used.
+ * \tparam SizeLimit limit on the number of items for a single reduce_by_key kernel launch.
+ */
+template<unsigned int         BlockSize,
+         unsigned int         ItemsPerThread,
+         block_load_method    LoadKeysMethod   = block_load_method::block_load_transpose,
+         block_load_method    LoadValuesMethod = block_load_method::block_load_transpose,
+         block_scan_algorithm ScanAlgorithm    = block_scan_algorithm::using_warp_scan,
+         unsigned int         TilesPerBlock    = 1,
+         unsigned int         SizeLimit        = ROCPRIM_GRID_SIZE_LIMIT>
+struct reduce_by_key_config : public detail::reduce_by_key_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    /// Number of threads in a block.
+    static constexpr unsigned int block_size = BlockSize;
+    /// Number of tiles (`BlockSize` * `ItemsPerThread` items) to process per block
+    /// This value is only here for legacy purposes and no longer used.
+    static constexpr unsigned int tiles_per_block = TilesPerBlock;
+    /// Number of items processed by each thread per tile.
+    static constexpr unsigned int items_per_thread = ItemsPerThread;
+    /// A rocprim::block_load_method emum value indicating how the keys should be loaded.
+    /// Defaults to block_load_method::block_load_transpose
+    static constexpr block_load_method load_keys_method = LoadKeysMethod;
+    /// A rocprim::block_load_method emum value indicating how the values should be loaded.
+    /// Defaults to block_load_method::block_load_transpose
+    static constexpr block_load_method load_values_method = LoadValuesMethod;
+    /// A rocprim::block_scan_algorithm enum value indicating how the reduction should
+    /// be done. Defaults to block_scan_algorithm::using_warp_scan
+    static constexpr block_scan_algorithm scan_algorithm = ScanAlgorithm;
+    /// Maximum possible number of values. Defaults to ROCPRIM_GRID_SIZE_LIMIT.
+    static constexpr unsigned int size_limit = SizeLimit;
+
+    constexpr reduce_by_key_config()
+        : detail::reduce_by_key_config_params{
+            {BlockSize, ItemsPerThread, SizeLimit},
+            TilesPerBlock,
+            LoadKeysMethod,
+            LoadValuesMethod,
+            ScanAlgorithm
+    } {};
+#endif
+};
+
+namespace detail
+{
+
+template<class Key, class Value>
+struct default_reduce_by_key_config_base
+{
+    using small_config = reduce_by_key_config<256,
+                                              15,
+                                              block_load_method::block_load_transpose,
+                                              block_load_method::block_load_transpose,
+                                              block_scan_algorithm::using_warp_scan,
+                                              sizeof(Value) < 16 ? 1 : 2>;
+
+    static constexpr unsigned int size_memory_per_item = std::max(sizeof(Key), sizeof(Value));
+    static constexpr unsigned int item_scale
+        = static_cast<unsigned int>(ceiling_div(size_memory_per_item, 2 * sizeof(int)));
+    static constexpr unsigned int items_per_thread = std::max(1u, 15u / item_scale);
+
+    using large_config
+        = reduce_by_key_config<limit_block_size<256U,
+                                                items_per_thread * size_memory_per_item,
+                                                ROCPRIM_WARP_SIZE_64>::value,
+                               items_per_thread,
+                               block_load_method::block_load_transpose,
+                               block_load_method::block_load_transpose,
+                               block_scan_algorithm::using_warp_scan,
+                               2>;
+
+    using type = std::
+        conditional_t<std::max(sizeof(Key), sizeof(Value)) <= 16, small_config, large_config>;
+};
+
+} // namespace detail
+
+namespace detail
+{
+
+struct nth_element_config_params
+{
+    unsigned int               stop_recursion_size;
+    unsigned int               number_of_buckets;
+    block_radix_rank_algorithm radix_rank_algorithm;
+    kernel_config_params       kernel_config;
+};
+
+} // namespace detail
+
+/// \brief Configuration of device-level nth_element
+///
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
+/// \tparam StopRecursionSize the size from where recursion is stopped to do a block sort
+/// \tparam NumberOfBuckets the number of buckets that are used in the algorithm
+/// \tparam RadixRankAlgorithm algorithm for radix rank
+template<unsigned int               BlockSize,
+         unsigned int               ItemsPerThread,
+         unsigned int               StopRecursionSize,
+         unsigned int               NumberOfBuckets,
+         block_radix_rank_algorithm RadixRankAlgorithm>
+struct nth_element_config : public detail::nth_element_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    constexpr nth_element_config()
+        : detail::nth_element_config_params{
+            StopRecursionSize,
+            NumberOfBuckets,
+            RadixRankAlgorithm,
+            {BlockSize, ItemsPerThread, ROCPRIM_GRID_SIZE_LIMIT}
+    }
+    {}
+#endif
+};
+
+namespace detail
+{
+struct non_trivial_runs_config_tag
+{};
+
+struct non_trivial_runs_config_params
+{
+    kernel_config_params kernel_config;
+    block_load_method    load_input_method;
+    block_scan_algorithm scan_algorithm;
+};
+
+} // namespace detail
+
+/// \brief Configuration of device-level run length encode (non-trivial runs) operation.
+///
+/// \tparam BlockSize - number of threads in a block.
+/// \tparam ItemsPerThread - number of items processed by each thread.
+/// \tparam LoadInputMethod - method for loading inputs.
+/// \tparam BlockScanMethod - algorithm for block scan.
+template<unsigned int                 BlockSize,
+         unsigned int                 ItemsPerThread,
+         ::rocprim::block_load_method LoadInputMethod
+         = ::rocprim::block_load_method::default_method,
+         ::rocprim::block_scan_algorithm BlockScanAlgorithm
+         = ::rocprim::block_scan_algorithm::reduce_then_scan>
+struct non_trivial_runs_config : public detail::non_trivial_runs_config_params
+{
+    /// \brief Identifies the algorithm associated to the config.
+    using tag = detail::non_trivial_runs_config_tag;
+#ifndef DOXYGEN_DOCUMENTATION_BUILD
+    /// \brief Number of threads in a block.
+    static constexpr unsigned int block_size = BlockSize;
+    /// \brief Number of items processed by each thread.
+    static constexpr unsigned int items_per_thread = ItemsPerThread;
+    /// \brief Method for loading inputs.
+    static constexpr block_load_method load_input_method = LoadInputMethod;
+    /// \brief Algorithm for block scan.
+    static constexpr block_scan_algorithm scan_algorithm = BlockScanAlgorithm;
+
+    constexpr non_trivial_runs_config()
+        : detail::non_trivial_runs_config_params{
+            {BlockSize, ItemsPerThread},
+            LoadInputMethod, BlockScanAlgorithm
+    } {};
+#endif // DOXYGEN_DOCUMENTATION_BUILD
+};
+
+namespace detail
+{
+
+template<typename InputT, int ItemScaleBase = 32>
+struct default_non_trivial_runs_config_base
+{
+    static constexpr unsigned int items_per_thread = 16;
+    using small_config                             = non_trivial_runs_config<256U,
+                                                 items_per_thread,
+                                                 block_load_method::block_load_vectorize,
+                                                 block_scan_algorithm::reduce_then_scan>;
+
+    using OffsetCountPairT = ::rocprim::tuple<unsigned int, unsigned int>;
+
+    static constexpr unsigned int size_memory_per_item
+        = std::max(sizeof(InputT), sizeof(OffsetCountPairT));
+
+    // Additional shared memory is required by the lookback scan state.
+    static constexpr unsigned int shared_mem_offset
+        = sizeof(typename offset_lookback_scan_prefix_op<
+                 OffsetCountPairT,
+                 lookback_scan_state<OffsetCountPairT>>::storage_type);
+
+    using big_config
+        = non_trivial_runs_config<detail::limit_block_size<64U,
+                                                           items_per_thread * size_memory_per_item,
+                                                           ROCPRIM_WARP_SIZE_64,
+                                                           shared_mem_offset>::value,
+                                  items_per_thread,
+                                  block_load_method::block_load_warp_transpose,
+                                  block_scan_algorithm::reduce_then_scan>;
+
+    using type = std::conditional_t<sizeof(InputT) < 8, small_config, big_config>;
+};
+
+struct find_first_of_config_params
+{
+    kernel_config_params kernel_config{};
+};
+
+struct adjacent_find_config_tag
+{};
+
+struct adjacent_find_config_params
+{
+    kernel_config_params kernel_config;
+};
+
+} // namespace detail
+
+/// \brief Configuration of device-level find_first_of
+///
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
+template<unsigned int BlockSize, unsigned int ItemsPerThread>
+struct find_first_of_config : public detail::find_first_of_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    constexpr find_first_of_config()
+        : detail::find_first_of_config_params{
+            {BlockSize, ItemsPerThread, 0}
+    }
+    {}
+#endif
+};
+
+/// \brief Configuration of device-level adjacent_find
+///
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
+template<unsigned int BlockSize, unsigned int ItemsPerThread>
+struct adjacent_find_config : public detail::adjacent_find_config_params
+{
+    /// \brief Identifies the algorithm associated to the config.
+    using tag = detail::adjacent_find_config_tag;
+#ifndef DOXYGEN_DOCUMENTATION_BUILD
+    constexpr adjacent_find_config()
+        : detail::adjacent_find_config_params{
+            {BlockSize, ItemsPerThread, ROCPRIM_GRID_SIZE_LIMIT}
+    }
+    {}
+#endif // DOXYGEN_DOCUMENTATION_BUILD
+};
+
+namespace detail
+{
+
+template<class Value>
+struct default_find_first_of_config_base
+{
+    static constexpr unsigned int item_scale
+        = ::rocprim::detail::ceiling_div<unsigned int>(sizeof(Value), sizeof(int));
+
+    using type = find_first_of_config<256, ::rocprim::max(1u, 16u / item_scale)>;
+};
+
+template<typename InputT>
+struct default_adjacent_find_config_base
+{
+    static constexpr unsigned int item_scale
+        = ::rocprim::detail::ceiling_div<unsigned int>(sizeof(InputT), sizeof(int));
+
+    using type
+        = adjacent_find_config<limit_block_size<1024U, sizeof(InputT), ROCPRIM_WARP_SIZE_64>::value,
+                               ::rocprim::max(1u, 16u / item_scale)>;
+};
+
+} // namespace detail
+
+namespace detail
+{
+
+struct search_config_params
+{
+    unsigned int         max_shared_key_bytes;
+    kernel_config_params kernel_config;
+};
+
+} // namespace detail
+
+/// \brief Configuration of device-level find_end
+///
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
+/// \tparam MaxSharedKeyBytes maximum number of bytes for which a shared key is used.
+template<unsigned int BlockSize, unsigned int ItemsPerThread, unsigned int MaxSharedKeyBytes>
+struct search_config : public detail::search_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    constexpr search_config()
+        : detail::search_config_params{
+            MaxSharedKeyBytes, {BlockSize, ItemsPerThread, ROCPRIM_GRID_SIZE_LIMIT}
+    }
+    {}
+#endif
+};
+
+namespace detail
+{
+struct search_n_config_params
+{
+    size_t               threshold;
+    kernel_config_params kernel_config;
+};
+} // namespace detail
+
+/// \brief Configuration of device-level search_n
+///
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
+template<unsigned int BlockSize, unsigned int ItemsPerThread>
+struct search_n_config : public detail::search_n_config_params
+{
+#ifndef DOXYGEN_DOCUMENTATION_BUILD
+    constexpr search_n_config()
+        : detail::search_n_config_params{
+            6, {BlockSize, ItemsPerThread, 0}
+    }
+    {}
+#endif
+};
+
+namespace detail
+{
+
+struct merge_config_params
+{
+    kernel_config_params kernel_config;
+};
+
+} // namespace detail
+
+/**
+ * \brief Configuration of device-level merge operation.
+ *
+ * \tparam BlockSize number of threads in a block.
+ * \tparam ItemsPerThread number of items processed by each thread per tile.
+ */
+template<unsigned int BlockSize, unsigned int ItemsPerThread>
+struct merge_config : public detail::merge_config_params
+{
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    /// Number of threads in a block.
+    static constexpr unsigned int block_size = BlockSize;
+    /// Number of items processed by each thread per tile.
+    static constexpr unsigned int items_per_thread = ItemsPerThread;
+
+    constexpr merge_config()
+        : detail::merge_config_params{
+            {BlockSize, ItemsPerThread}
+    } {};
+
+#endif
+};
+
+namespace detail
+{
+
+template<class Key, class Value>
+struct default_merge_config_base
+{
+    static constexpr unsigned int item_scale = ::rocprim::detail::ceiling_div<unsigned int>(
+        ::rocprim::max(sizeof(Key), sizeof(Value)), sizeof(int));
+
+    using type = merge_config<limit_block_size<256u,
+                                               rocprim::max(sizeof(Key), sizeof(Value)),
+                                               ROCPRIM_WARP_SIZE_64>::value,
+                              ::rocprim::max(1u, 10u / item_scale)>;
+};
+
+template<class Key>
+struct default_merge_config_base<Key, empty_type>
+{
+    static constexpr unsigned int item_scale
+        = ::rocprim::detail::ceiling_div<unsigned int>(sizeof(Key), sizeof(int));
+
+    using type
+        = select_type<select_type_case<sizeof(Key) <= 2, merge_config<256, 11>>,
+                      select_type_case<sizeof(Key) <= 4, merge_config<256, 10>>,
+                      select_type_case<sizeof(Key) <= 8, merge_config<256, 7>>,
+                      merge_config<limit_block_size<256u, sizeof(Key), ROCPRIM_WARP_SIZE_64>::value,
+                                   ::rocprim::max(1u, 10u / item_scale)>>;
 };
 
 } // namespace detail

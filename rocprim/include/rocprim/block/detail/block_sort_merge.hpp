@@ -1,4 +1,4 @@
-// Copyright (c) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,7 +25,6 @@
 #include "../../detail/merge_path.hpp"
 #include "../../detail/various.hpp"
 #include "../../warp/detail/warp_sort_stable.hpp"
-#include "../../warp/warp_sort.hpp"
 
 BEGIN_ROCPRIM_NAMESPACE
 
@@ -58,7 +57,9 @@ class block_sort_merge
     union storage_type_
     {
         typename warp_sort_type::storage_type   warp_sort;
+        ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
         detail::raw_storage<Key[ItemsPerBlock]> keys;
+        ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
     };
 
     template<>
@@ -67,8 +68,10 @@ class block_sort_merge
         typename warp_sort_type::storage_type warp_sort;
         struct
         {
+            ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
             detail::raw_storage<Key[ItemsPerBlock]>   keys;
             detail::raw_storage<Value[ItemsPerBlock]> values;
+            ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
         };
     };
 
@@ -381,10 +384,14 @@ private:
                                                             diag0_local,
                                                             compare_function);
             const unsigned int keys2_beg_local = diag0_local - keys1_beg_local;
-            range_t            range_local
-                = {keys1_beg_local + keys1_beg, keys1_end, keys2_beg_local + keys1_end, keys2_end};
 
-            serial_merge(keys_shared, thread_keys, range_local, compare_function);
+            range_t<> range_local{keys1_beg_local + keys1_beg,
+                                  keys1_end,
+                                  keys2_beg_local + keys1_end,
+                                  keys2_end};
+
+            serial_merge<false>(keys_shared, thread_keys, range_local, compare_function);
+            ::rocprim::syncthreads();
         }
     }
 
@@ -422,15 +429,19 @@ private:
                                                             diag0_local,
                                                             compare_function);
             const unsigned int keys2_beg_local = diag0_local - keys1_beg_local;
-            range_t            range_local
-                = {keys1_beg_local + keys1_beg, keys1_end, keys2_beg_local + keys1_end, keys2_end};
 
-            serial_merge(keys_shared,
-                         thread_keys,
-                         values_shared,
-                         thread_values,
-                         range_local,
-                         compare_function);
+            range_t<> range_local{keys1_beg_local + keys1_beg,
+                                  keys1_end,
+                                  keys2_beg_local + keys1_end,
+                                  keys2_end};
+
+            serial_merge<false>(keys_shared,
+                                thread_keys,
+                                values_shared,
+                                thread_values,
+                                range_local,
+                                compare_function);
+            ::rocprim::syncthreads();
         }
     }
 };

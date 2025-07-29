@@ -41,8 +41,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 32;
+#ifndef DEFAULT_BYTES
+const size_t DEFAULT_BYTES = 1024 * 1024 * 32 *4;
 #endif
 
 namespace rp = rocprim;
@@ -87,42 +87,35 @@ void warp_sort_by_key_kernel(K* input_keys, V* input_values, K* output_keys, V* 
     rp::block_store_direct_blocked(flat_tid, output_values + block_offset, values);
 }
 
-template<class Value>
-Value get_max_value()
+template<class Key,
+         unsigned int BlockSize,
+         unsigned int WarpSize,
+         unsigned int ItemsPerThread = 1,
+         class Value                 = Key,
+         bool         SortByKey      = false,
+         unsigned int Trials         = 100>
+void run_benchmark(benchmark::State&   state,
+                   size_t              bytes,
+                   const managed_seed& seed,
+                   hipStream_t         stream)
 {
-    return Value(10000);
-}
+    // Calculate the number of elements 
+    size_t size = bytes / sizeof(Key);
 
-template<>
-char get_max_value()
-{
-    return std::numeric_limits<char>::max();
-}
-
-template<>
-custom_type<char, double> get_max_value()
-{
-    return custom_type<char, double>(std::numeric_limits<char>::max());
-}
-
-template<
-    class Key,
-    unsigned int BlockSize,
-    unsigned int WarpSize,
-    unsigned int ItemsPerThread = 1,
-    class Value = Key,
-    bool SortByKey = false,
-    unsigned int Trials = 100
->
-void run_benchmark(benchmark::State& state, hipStream_t stream, size_t size)
-{
     // Make sure size is a multiple of items_per_block
     constexpr auto items_per_block = BlockSize * ItemsPerThread;
     size = BlockSize * ((size + items_per_block - 1) / items_per_block);
     // Allocate and fill memory
-    std::vector<Key> input_key = get_random_data<Key>(size, 0, get_max_value<Key>());
+    const auto       random_range = limit_random_range<Key>(0, 10'000);
+    std::vector<Key> input_key
+        = get_random_data<Key>(size, random_range.first, random_range.second, seed.get_0());
     std::vector<Value> input_value(size_t(1));
-    if(SortByKey) input_value = get_random_data<Value>(size, 0, get_max_value<Value>());
+    if(SortByKey)
+    {
+        const auto random_range = limit_random_range<Value>(0, 10'000);
+        input_value
+            = get_random_data<Value>(size, random_range.first, random_range.second, seed.get_1());
+    }
     Key * d_input_key = nullptr;
     Key * d_output_key = nullptr;
     Value * d_input_value = nullptr;
@@ -215,8 +208,9 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t size)
                                   + ",ws:" #WS ",cfg:{bs:" #BS ",ipt:" #IPT "}}")    \
             .c_str(),                                                                \
         run_benchmark<K, BS, WS, IPT>,                                               \
-        stream,                                                                      \
-        size)
+        bytes,                                                                        \
+        seed,                                                                        \
+        stream)
 
 #define CREATE_SORTBYKEY_BENCHMARK(K, V, BS, WS, IPT)                                         \
     benchmark::RegisterBenchmark(bench_naming::format_name("{lvl:warp,algo:sort,key_type:" #K \
@@ -224,8 +218,9 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t size)
                                                            ",cfg:{bs:" #BS ",ipt:" #IPT "}}") \
                                      .c_str(),                                                \
                                  run_benchmark<K, BS, WS, IPT, V, true>,                      \
-                                 stream,                                                      \
-                                 size)
+                                 bytes,                                                        \
+                                 seed,                                                        \
+                                 stream)
 
 #define BENCHMARK_TYPE(type) \
     CREATE_SORT_BENCHMARK(type,  64, 64, 1), \
@@ -254,26 +249,30 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t size)
 int main(int argc, char *argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
     parser.run_and_exit_if_error();
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size = parser.get<size_t>("size");
+    const size_t bytes = parser.get<size_t>("size");
     const int trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     using custom_double2 = custom_type<double, double>;
     using custom_int_double = custom_type<int, double>;

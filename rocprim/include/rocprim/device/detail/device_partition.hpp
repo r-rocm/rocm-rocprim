@@ -34,6 +34,8 @@
 #include "../../block/block_scan.hpp"
 #include "../../block/block_discontinuity.hpp"
 
+#include "../config_types.hpp"
+#include "device_config_helper.hpp"
 #include "lookback_scan_state.hpp"
 #include "rocprim/type_traits.hpp"
 #include "rocprim/types/tuple.hpp"
@@ -44,12 +46,29 @@ namespace detail
 {
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
+
 enum class select_method
 {
-    flag = 0,
-    predicate = 1,
-    unique = 2
+    flag            = 0,
+    predicate       = 1,
+    predicated_flag = 2,
+    unique          = 3
 };
+
+enum class partition_subalgo
+{
+    partition_two_way_predicate,
+    partition_two_way_flag,
+    partition_flag,
+    partition_predicate,
+    partition_three_way,
+    select_flag,
+    select_predicate,
+    select_predicated_flag,
+    select_unique,
+    select_unique_by_key
+};
+
 #endif // DOXYGEN_SHOULD_SKIP_THIS
 
 template<select_method SelectMethod,
@@ -93,6 +112,60 @@ ROCPRIM_DEVICE ROCPRIM_INLINE auto
                 is_selected,
                 storage.load_flags
             );
+    }
+    ::rocprim::syncthreads(); // sync threads to reuse shared memory
+}
+
+template<select_method SelectMethod,
+         unsigned int  BlockSize,
+         class BlockLoadFlagsType,
+         class BlockDiscontinuityType,
+         class InputIterator,
+         class FlagIterator,
+         class ValueType,
+         unsigned int ItemsPerThread,
+         class UnaryPredicate,
+         class InequalityOp,
+         class StorageType>
+ROCPRIM_DEVICE ROCPRIM_INLINE
+auto partition_block_load_flags(InputIterator /* block_predecessor */,
+                                FlagIterator block_flags,
+                                ValueType (& /* values */)[ItemsPerThread],
+                                bool (&is_selected)[ItemsPerThread],
+                                UnaryPredicate predicate,
+                                InequalityOp /* inequality_op */,
+                                StorageType& storage,
+                                const bool /* is_first_block */,
+                                const unsigned int block_thread_id,
+                                const bool         is_global_last_block,
+                                const unsigned int valid_in_global_last_block) ->
+    typename std::enable_if<SelectMethod == select_method::predicated_flag>::type
+{
+    using flag_type = typename std::iterator_traits<FlagIterator>::value_type;
+    flag_type flags[ItemsPerThread];
+
+    if(is_global_last_block) // last block
+    {
+        BlockLoadFlagsType().load(block_flags,
+                                  flags,
+                                  valid_in_global_last_block,
+                                  false,
+                                  storage.load_flags);
+        const auto offset = block_thread_id * ItemsPerThread;
+        ROCPRIM_UNROLL
+        for(unsigned int i = 0; i < ItemsPerThread; i++)
+        {
+            is_selected[i] = ((offset + i) < valid_in_global_last_block) && predicate(flags[i]);
+        }
+    }
+    else
+    {
+        BlockLoadFlagsType().load(block_flags, flags, storage.load_flags);
+        ROCPRIM_UNROLL
+        for(unsigned int i = 0; i < ItemsPerThread; i++)
+        {
+            is_selected[i] = predicate(flags[i]);
+        }
     }
     ::rocprim::syncthreads(); // sync threads to reuse shared memory
 }
@@ -846,7 +919,36 @@ template<select_method SelectMethod,
          class InequalityOp,
          class OffsetLookbackScanState,
          class... UnaryPredicates>
-ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
+ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE auto partition_kernel_impl(KeyIterator,
+                                                               ValueIterator,
+                                                               FlagIterator,
+                                                               OutputKeyIterator,
+                                                               OutputValueIterator,
+                                                               size_t*,
+                                                               size_t*,
+                                                               size_t,
+                                                               const size_t,
+                                                               InequalityOp,
+                                                               OffsetLookbackScanState,
+                                                               const unsigned int,
+                                                               UnaryPredicates...)
+    -> std::enable_if_t<!is_lookback_kernel_runnable<OffsetLookbackScanState>()>
+{
+    // No need to build the kernel with sleep on a device that does not require it
+}
+
+template<select_method SelectMethod,
+         bool          OnlySelected,
+         class Config,
+         class KeyIterator,
+         class ValueIterator, // Can be rocprim::empty_type* if key only
+         class FlagIterator,
+         class OutputKeyIterator,
+         class OutputValueIterator,
+         class InequalityOp,
+         class OffsetLookbackScanState,
+         class... UnaryPredicates>
+ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE auto
     partition_kernel_impl(KeyIterator             keys_input,
                           ValueIterator           values_input,
                           FlagIterator            flags,
@@ -860,32 +962,31 @@ ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
                           OffsetLookbackScanState offset_scan_state,
                           const unsigned int      number_of_blocks,
                           UnaryPredicates... predicates)
+        -> std::enable_if_t<is_lookback_kernel_runnable<OffsetLookbackScanState>()>
 {
-    constexpr auto block_size = Config::block_size;
-    constexpr auto items_per_thread = Config::items_per_thread;
-    constexpr unsigned int items_per_block = block_size * items_per_thread;
+    static constexpr partition_config_params params = device_params<Config>();
+
+    constexpr auto         block_size       = params.kernel_config.block_size;
+    constexpr auto         items_per_thread = params.kernel_config.items_per_thread;
+    constexpr unsigned int items_per_block  = block_size * items_per_thread;
 
     using offset_type = typename OffsetLookbackScanState::value_type;
     using key_type = typename std::iterator_traits<KeyIterator>::value_type;
     using value_type = typename std::iterator_traits<ValueIterator>::value_type;
+    using flag_type =
+        typename std::conditional<SelectMethod == select_method::predicated_flag,
+                                  typename std::iterator_traits<FlagIterator>::value_type,
+                                  bool>::type;
 
     // Block primitives
-    using block_load_key_type = ::rocprim::block_load<
-        key_type, block_size, items_per_thread,
-        Config::key_block_load_method
-    >;
-    using block_load_value_type = ::rocprim::block_load<
-        value_type, block_size, items_per_thread,
-        Config::value_block_load_method
-    >;
-    using block_load_flag_type = ::rocprim::block_load<
-        bool, block_size, items_per_thread,
-        Config::flag_block_load_method
-    >;
-    using block_scan_offset_type = ::rocprim::block_scan<
-        offset_type, block_size,
-        Config::block_scan_method
-    >;
+    using block_load_key_type = ::rocprim::
+        block_load<key_type, block_size, items_per_thread, params.key_block_load_method>;
+    using block_load_value_type = ::rocprim::
+        block_load<value_type, block_size, items_per_thread, params.value_block_load_method>;
+    using block_load_flag_type = ::rocprim::
+        block_load<flag_type, block_size, items_per_thread, params.flag_block_load_method>;
+    using block_scan_offset_type
+        = ::rocprim::block_scan<offset_type, block_size, params.block_scan_method>;
     using block_discontinuity_key_type = ::rocprim::block_discontinuity<key_type, block_size>;
 
     // Offset prefix operation type
@@ -894,10 +995,12 @@ ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE void
     >;
 
     // Memory required for 2-phase scatter
-    using exchange_keys_storage_type = key_type[items_per_block];
-    using raw_exchange_keys_storage_type = typename detail::raw_storage<exchange_keys_storage_type>;
+    using exchange_keys_storage_type   = key_type[items_per_block];
     using exchange_values_storage_type = value_type[items_per_block];
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
+    using raw_exchange_keys_storage_type = typename detail::raw_storage<exchange_keys_storage_type>;
     using raw_exchange_values_storage_type = typename detail::raw_storage<exchange_values_storage_type>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     using is_selected_type = std::conditional_t<
         sizeof...(UnaryPredicates) == 1,

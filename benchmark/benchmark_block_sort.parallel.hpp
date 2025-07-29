@@ -227,21 +227,21 @@ public:
                            d_output);
     }
 
-    void run(benchmark::State& state, const std::size_t N, const hipStream_t stream) const override
+    void run(benchmark::State&   state,
+             size_t              bytes,
+             const managed_seed& seed,
+             hipStream_t         stream) const override
     {
+        // Calculate the number of elements N
+        size_t N = bytes / sizeof(KeyType);
+
         const auto size = items_per_block * ((N + items_per_block - 1) / items_per_block);
 
-        std::vector<KeyType> input;
-        if(std::is_floating_point<KeyType>::value)
-        {
-            input = get_random_data<KeyType>(size, (KeyType)-1000, (KeyType) + 1000);
-        }
-        else
-        {
-            input = get_random_data<KeyType>(size,
-                                             std::numeric_limits<KeyType>::min(),
-                                             std::numeric_limits<KeyType>::max());
-        }
+        std::vector<KeyType> input = get_random_data<KeyType>(size,
+                                                              generate_limits<KeyType>::min(),
+                                                              generate_limits<KeyType>::max(),
+                                                              seed.get_0());
+
         KeyType* d_input;
         KeyType* d_output;
         HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_input), size * sizeof(KeyType)));

@@ -39,7 +39,8 @@ template<class InputType,
          bool   UseIdentityIterator = false,
          size_t SizeLimit           = ROCPRIM_GRID_SIZE_LIMIT,
          bra    Algo                = bra::default_algorithm,
-         bool   UseGraphs           = false>
+         bool   UseGraphs           = false,
+         bool   Deterministic       = false>
 struct DeviceReduceParams
 {
     static constexpr bra algo = Algo;
@@ -108,6 +109,34 @@ typedef ::testing::Types<
     DeviceReduceParams<rocprim::bfloat16, rocprim::bfloat16>,
     DeviceReduceParams<test_utils::custom_test_type<float>, test_utils::custom_test_type<float>>,
     DeviceReduceParams<test_utils::custom_test_type<int>, test_utils::custom_test_type<float>>,
+    DeviceReduceParams<rocprim::half,
+                       rocprim::half,
+                       false,
+                       ROCPRIM_GRID_SIZE_LIMIT,
+                       bra::default_algorithm,
+                       false,
+                       true>,
+    DeviceReduceParams<float,
+                       float,
+                       false,
+                       ROCPRIM_GRID_SIZE_LIMIT,
+                       bra::default_algorithm,
+                       false,
+                       true>,
+    DeviceReduceParams<double,
+                       double,
+                       false,
+                       ROCPRIM_GRID_SIZE_LIMIT,
+                       bra::default_algorithm,
+                       false,
+                       true>,
+    DeviceReduceParams<test_utils::custom_test_type<double>,
+                       test_utils::custom_test_type<double>,
+                       false,
+                       ROCPRIM_GRID_SIZE_LIMIT,
+                       bra::default_algorithm,
+                       false,
+                       true>,
     DeviceReduceParams<int, int, false, ROCPRIM_GRID_SIZE_LIMIT, bra::default_algorithm, true>>
     RocprimDeviceReduceTestsParams;
 
@@ -158,10 +187,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceEmptyInput)
     void * d_temp_storage = nullptr;
     HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
 
-    hipGraph_t graph;
+    test_utils::GraphHelper gHelper;
     if(TestFixture::use_graphs)
     {
-        graph = test_utils::createGraphHelper(stream);
+        gHelper.startStreamCapture(stream);
     }
 
     // Run
@@ -175,10 +204,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceEmptyInput)
         )
     );
 
-    hipGraphExec_t graph_instance;
+    
     if(TestFixture::use_graphs)
     {
-        graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, true);
+        gHelper.createAndLaunchGraph(stream);
     }
 
     HIP_CHECK(hipDeviceSynchronize());
@@ -193,12 +222,12 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceEmptyInput)
     );
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, initial_value));
 
-    hipFree(d_output);
-    hipFree(d_temp_storage);
-    
+    HIP_CHECK(hipFree(d_output));
+    HIP_CHECK(hipFree(d_temp_storage));
+
     if (TestFixture::use_graphs)
     {
-        test_utils::cleanupGraphHelper(graph, graph_instance);
+        gHelper.cleanupGraphHelper();
         HIP_CHECK(hipStreamDestroy(stream));
     }
 }
@@ -286,10 +315,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceSum)
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
             HIP_CHECK(hipDeviceSynchronize());
 
-            hipGraph_t graph;
+            test_utils::GraphHelper gHelper;
             if(TestFixture::use_graphs)
             {
-                graph = test_utils::createGraphHelper(stream);
+                gHelper.startStreamCapture(stream);
             }
 
             // Run
@@ -302,10 +331,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceSum)
                 )
             );
 
-            hipGraphExec_t graph_instance;
+            
             if(TestFixture::use_graphs)
             {
-                graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, true);
+                gHelper.createAndLaunchGraph(stream);
             }
 
             HIP_CHECK(hipGetLastError());
@@ -325,13 +354,13 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceSum)
             ASSERT_NO_FATAL_FAILURE(
                 test_utils::assert_near(output[0], expected, test_utils::precision<U> * size));
 
-            hipFree(d_input);
-            hipFree(d_output);
-            hipFree(d_temp_storage);
-            
+            HIP_CHECK(hipFree(d_input));
+            HIP_CHECK(hipFree(d_output));
+            HIP_CHECK(hipFree(d_temp_storage));
+
             if (TestFixture::use_graphs)
             {
-                test_utils::cleanupGraphHelper(graph, graph_instance);
+                gHelper.cleanupGraphHelper();
                 HIP_CHECK(hipStreamDestroy(stream));
             }
         }
@@ -438,10 +467,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceArgMinimum)
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
             HIP_CHECK(hipDeviceSynchronize());
 
-            hipGraph_t graph;
+            test_utils::GraphHelper gHelper;
             if(TestFixture::use_graphs)
             {
-                graph = test_utils::createGraphHelper(stream);
+                gHelper.startStreamCapture(stream);
             }
 
             // Run
@@ -454,10 +483,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceArgMinimum)
                 )
             );
 
-            hipGraphExec_t graph_instance;
+            
             if(TestFixture::use_graphs)
             {
-                graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, true);
+                gHelper.createAndLaunchGraph(stream);
             }
 
             HIP_CHECK(hipGetLastError());
@@ -477,13 +506,13 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceArgMinimum)
             test_utils::assert_eq(output[0].key, expected.key);
             test_utils::assert_eq(output[0].value, expected.value);
 
-            hipFree(d_input);
-            hipFree(d_output);
-            hipFree(d_temp_storage);
+            HIP_CHECK(hipFree(d_input));
+            HIP_CHECK(hipFree(d_output));
+            HIP_CHECK(hipFree(d_temp_storage));
 
             if (TestFixture::use_graphs)
             {
-                test_utils::cleanupGraphHelper(graph, graph_instance);
+                gHelper.cleanupGraphHelper();
                 HIP_CHECK(hipStreamDestroy(stream));
             }
         }
@@ -540,10 +569,10 @@ void testLargeIndices()
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
             HIP_CHECK(hipDeviceSynchronize());
 
-            hipGraph_t graph;
+            test_utils::GraphHelper gHelper;
             if(use_graphs)
             {
-                graph = test_utils::createGraphHelper(stream);
+                gHelper.startStreamCapture(stream);
             }
 
             // Run
@@ -556,10 +585,10 @@ void testLargeIndices()
                                       stream,
                                       debug_synchronous));
 
-            hipGraphExec_t graph_instance;
+            
             if(use_graphs)
             {
-                graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, false);
+                gHelper.createAndLaunchGraph(stream, true, false);
             }
 
             HIP_CHECK(hipGetLastError());
@@ -576,12 +605,12 @@ void testLargeIndices()
 
             ASSERT_EQ(output, expected_output);
 
-            hipFree(d_temp_storage);
-            hipFree(d_output);
+            HIP_CHECK(hipFree(d_temp_storage));
+            HIP_CHECK(hipFree(d_output));
 
             if(use_graphs)
             {
-                test_utils::cleanupGraphHelper(graph, graph_instance);
+                gHelper.cleanupGraphHelper();
             }
         }
     }
@@ -682,10 +711,10 @@ TYPED_TEST(RocprimDeviceReducePrecisionTests, ReduceSumInputEqualExponentFunctio
         HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
         HIP_CHECK(hipDeviceSynchronize());
 
-        hipGraph_t graph;
+        test_utils::GraphHelper gHelper;
         if(TestFixture::use_graphs)
         {
-            graph = test_utils::createGraphHelper(stream);
+            gHelper.startStreamCapture(stream);
         }
 
         // Run
@@ -699,10 +728,10 @@ TYPED_TEST(RocprimDeviceReducePrecisionTests, ReduceSumInputEqualExponentFunctio
             stream,
             debug_synchronous));
 
-        hipGraphExec_t graph_instance;
+        
         if(TestFixture::use_graphs)
         {
-            graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, true);
+            gHelper.createAndLaunchGraph(stream);
         }
 
         HIP_CHECK(hipGetLastError());
@@ -716,13 +745,13 @@ TYPED_TEST(RocprimDeviceReducePrecisionTests, ReduceSumInputEqualExponentFunctio
         // Check if output values are as expected
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_near(output[0], expected, precision));
 
-        hipFree(d_input);
-        hipFree(d_output);
-        hipFree(d_temp_storage);
+        HIP_CHECK(hipFree(d_input));
+        HIP_CHECK(hipFree(d_output));
+        HIP_CHECK(hipFree(d_temp_storage));
 
         if (TestFixture::use_graphs)
         {
-            test_utils::cleanupGraphHelper(graph, graph_instance);
+            gHelper.cleanupGraphHelper();
             HIP_CHECK(hipStreamDestroy(stream));
         }
     }
@@ -804,10 +833,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceMinimum)
             HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
             HIP_CHECK(hipDeviceSynchronize());
 
-            hipGraph_t graph;
+            test_utils::GraphHelper gHelper;
             if(TestFixture::use_graphs)
             {
-                graph = test_utils::createGraphHelper(stream);
+                gHelper.startStreamCapture(stream);
             }
 
             // Run
@@ -829,10 +858,10 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceMinimum)
                 )
             );
 
-            hipGraphExec_t graph_instance;
+            
             if(TestFixture::use_graphs)
             {
-                graph_instance = test_utils::endCaptureGraphHelper(graph, stream, true, false);
+                gHelper.createAndLaunchGraph(stream, true, false);
             }
 
             HIP_CHECK(hipDeviceSynchronize());
@@ -845,13 +874,13 @@ TYPED_TEST(RocprimDeviceReduceTests, ReduceMinimum)
                     ? 0
                     : std::max(test_utils::precision<T>, test_utils::precision<U>)));
 
-            hipFree(d_input);
-            hipFree(d_output);
-            hipFree(d_temp_storage);
+            HIP_CHECK(hipFree(d_input));
+            HIP_CHECK(hipFree(d_output));
+            HIP_CHECK(hipFree(d_temp_storage));
 
             if (TestFixture::use_graphs)
             {
-                test_utils::cleanupGraphHelper(graph, graph_instance);
+                gHelper.cleanupGraphHelper();
                 HIP_CHECK(hipStreamDestroy(stream));
             }
         }

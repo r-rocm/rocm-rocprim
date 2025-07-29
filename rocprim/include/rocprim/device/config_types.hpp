@@ -169,8 +169,12 @@ enum class target_arch : unsigned int
     gfx906  = 906,
     gfx908  = 908,
     gfx90a  = 910,
+    gfx942  = 942,
     gfx1030 = 1030,
+    gfx1100 = 1100,
     gfx1102 = 1102,
+    gfx1200 = 1200,
+    gfx1201 = 1201,
     unknown = std::numeric_limits<unsigned int>::max(),
 };
 #endif // DOXYGEN_SHOULD_SKIP_THIS
@@ -202,16 +206,29 @@ constexpr bool prefix_equals(const char* lhs, const char* rhs, std::size_t n)
 
 constexpr target_arch get_target_arch_from_name(const char* const arch_name, const std::size_t n)
 {
-    constexpr const char* target_names[]
-        = {"gfx803", "gfx900", "gfx906", "gfx908", "gfx90a", "gfx1030", "gfx1102"};
+    constexpr const char* target_names[]         = {"gfx803",
+                                                    "gfx900",
+                                                    "gfx906",
+                                                    "gfx908",
+                                                    "gfx90a",
+                                                    "gfx942",
+                                                    "gfx1030",
+                                                    "gfx1100",
+                                                    "gfx1102",
+                                                    "gfx1200",
+                                                    "gfx1201"};
     constexpr target_arch target_architectures[] = {
         target_arch::gfx803,
         target_arch::gfx900,
         target_arch::gfx906,
         target_arch::gfx908,
         target_arch::gfx90a,
+        target_arch::gfx942,
         target_arch::gfx1030,
+        target_arch::gfx1100,
         target_arch::gfx1102,
+        target_arch::gfx1200,
+        target_arch::gfx1201,
     };
     static_assert(sizeof(target_names) / sizeof(target_names[0])
                       == sizeof(target_architectures) / sizeof(target_architectures[0]),
@@ -264,10 +281,18 @@ auto dispatch_target_arch(const target_arch target_arch)
             return Config::template architecture_config<target_arch::gfx908>::params;
         case target_arch::gfx90a:
             return Config::template architecture_config<target_arch::gfx90a>::params;
+        case target_arch::gfx942:
+            return Config::template architecture_config<target_arch::gfx942>::params;
         case target_arch::gfx1030:
             return Config::template architecture_config<target_arch::gfx1030>::params;
+        case target_arch::gfx1100:
+            return Config::template architecture_config<target_arch::gfx1100>::params;
         case target_arch::gfx1102:
             return Config::template architecture_config<target_arch::gfx1102>::params;
+        case target_arch::gfx1200:
+            return Config::template architecture_config<target_arch::gfx1200>::params;
+        case target_arch::gfx1201:
+            return Config::template architecture_config<target_arch::gfx1201>::params;
         case target_arch::invalid:
             assert(false && "Invalid target architecture selected at runtime.");
     }
@@ -325,7 +350,15 @@ inline hipError_t get_device_arch(int device_id, target_arch& arch)
 inline hipError_t get_device_from_stream(const hipStream_t stream, int& device_id)
 {
     static constexpr hipStream_t default_stream = 0;
-    if(stream == default_stream || stream == hipStreamPerThread)
+
+    // hipStreamLegacy is supported in HIP >= 6.1.0
+#if (HIP_VERSION_MAJOR >= 6 && HIP_VERSION_MINOR >= 1)
+    const bool is_legacy_stream = (stream == hipStreamLegacy);
+#else
+    const bool is_legacy_stream = false;
+#endif
+
+    if (stream == default_stream || stream == hipStreamPerThread || is_legacy_stream);
     {
         const hipError_t result = hipGetDevice(&device_id);
         if(result != hipSuccess)

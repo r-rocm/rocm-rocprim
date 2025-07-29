@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Copyright 2021 Advanced Micro Devices, Inc.
+"""Copyright (c) 2021-2024 Advanced Micro Devices, Inc. All rights reserved.
 Run tests on build"""
 
 import re
@@ -30,8 +30,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="""
     Checks build arguments
     """)
-    parser.add_argument('-t', '--test', required=True, 
-                        help='Test set to run from rtest.xml (required, e.g. osdb)')
+    parser.add_argument('-e', '--emulation', required=False, default="",
+                        help='Test set to run from rtest.xml (optional, eg.smoke). At least one but not both of -e or -t must be set')
+    parser.add_argument('-t', '--test', required=False, default="", 
+                        help='Test set to run from rtest.xml (optional, e.g. osdb). At least one but not both of -e or -t must be set')
     parser.add_argument('-g', '--debug', required=False, default=False,  action='store_true',
                         help='Test Debug build (optional, default: false)')
     parser.add_argument('-o', '--output', type=str, required=False, default="xml", 
@@ -166,7 +168,7 @@ def run_cmd(cmd, test = False, time_limit = 0):
         else:
             error = False
             timeout = False
-            test_proc = subprocess.Popen(shlex.split(cmdline), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
+            test_proc = subprocess.Popen(cmdline, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
             if time_limit > 0:
                 start = time.monotonic()
                 #p = multiprocessing.Process(target=time_stop, args=(start, test_proc.pid))
@@ -205,13 +207,27 @@ def batch(script, xml):
     # 
     cwd = pathlib.os.curdir
     rtest_cwd_path = os.path.abspath( os.path.join( cwd, 'rtest.xml') )
+
     if os.path.isfile(rtest_cwd_path) and os.path.dirname(rtest_cwd_path).endswith( "staging" ):
         # if in a staging directory then test locally
         test_dir = cwd 
     else:
-        if args.debug: build_type = "debug"
-        else: build_type = "release"
-        test_dir = f"{args.install_dir}//{build_type}//test"
+        # deal with windows pathing
+        install_dir = '//'.join(args.install_dir.split('\\'))
+
+        if args.debug: 
+            build_type = "debug"
+        else: 
+            #check if  we have a release folder in build
+            if os.path.isdir(f'{install_dir}//release//test'):
+                build_type = "release"
+            else:
+                build_type = ""
+        
+        if len(build_type) > 0:
+            test_dir = f"{install_dir}//{build_type}//test"
+        else:
+            test_dir = f"{install_dir}//test"
     fail = False
     for i in range(len(script)):
         cmdline = script[i]
@@ -233,7 +249,34 @@ def batch(script, xml):
             for test in xml.getElementsByTagName('test'):
                 sets = test.getAttribute('sets')
                 runset = sets.split(',')
+
+                A, B = args.test != '', args.emulation != ''
+                if not (A ^ B):
+                    raise ValueError('At least one but not both of -e/--emulation or -t/--test must be set')
+
                 if args.test in runset:
+                    for run in test.getElementsByTagName('run'):
+                        name = run.getAttribute('name')
+                        vram_limit = run.getAttribute('vram_min')
+                        if vram_limit:
+                            if OS_info["VRAM"] < float(vram_limit):
+                                print( f'***\n*** Skipped: {name} due to VRAM req.\n***')
+                                continue
+                        if name:
+                            print( f'***\n*** Running: {name}\n***')
+                        time_limit = run.getAttribute('time_max')
+                        if time_limit:
+                            timeout = float(time_limit)
+                        else:
+                            timeout = 0
+
+                        raw_cmd = run.firstChild.data
+                        var_cmd = raw_cmd.format_map(var_subs)
+                        error = run_cmd(var_cmd, True, timeout)
+                        if (error == 2):
+                            print( f'***\n*** Timed out when running: {name}\n***')
+                
+                if args.emulation in runset:
                     for run in test.getElementsByTagName('run'):
                         name = run.getAttribute('name')
                         vram_limit = run.getAttribute('vram_min')
@@ -257,7 +300,6 @@ def batch(script, xml):
         else:
             error = run_cmd(cmd)
         fail = fail or error
-
     if (fail):
         if (cmd == "%XML%"):
             print(f"FAILED xml test suite!")
@@ -268,6 +310,7 @@ def batch(script, xml):
         return 1
     if (os.curdir != cwd):
         os.chdir( cwd )
+    
     return 0
 
 def run_tests():
@@ -301,8 +344,8 @@ def main():
 
     status = run_tests()
 
-    if args.fail_test: status = 1
-
+    if args.fail_test: 
+        status = 1
     if (status):
         sys.exit(status)
 

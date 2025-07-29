@@ -35,6 +35,9 @@ function(add_rocprim_test TEST_NAME TEST_SOURCES)
 endfunction()
 
 function(add_rocprim_test_internal TEST_NAME TEST_SOURCES TEST_TARGET)
+  if(USE_HIPCXX)
+    set_source_files_properties(${TEST_SOURCES} PROPERTIES LANGUAGE HIP)
+  endif()
   add_executable(${TEST_TARGET} ${TEST_SOURCES})
   if (ROCPRIM_INSTALL)
     rocm_install(TARGETS ${TEST_TARGET} COMPONENT tests)
@@ -47,27 +50,20 @@ function(add_rocprim_test_internal TEST_NAME TEST_SOURCES TEST_TARGET)
 
   target_link_libraries(${TEST_TARGET}
     PRIVATE
+      rocprim
       GTest::GTest
       GTest::Main
   )
-  if(NOT USE_HIP_CPU)
+
+  if(USE_HIPCXX)
     target_link_libraries(${TEST_TARGET}
       PRIVATE
-        rocprim_hip
+      $<IF:$<LINK_LANGUAGE:HIP>,hip::host,hip::device>
     )
   else()
     target_link_libraries(${TEST_TARGET}
       PRIVATE
-        rocprim
-        Threads::Threads
-        hip_cpu_rt::hip_cpu_rt
-    )
-    if(STL_DEPENDS_ON_TBB)
-      target_link_libraries(${TEST_TARGET}
-        PRIVATE
-          TBB::tbb
-      )
-    endif()
+      hip::device)
   endif()
 
   target_compile_options(${TEST_TARGET}
@@ -75,6 +71,7 @@ function(add_rocprim_test_internal TEST_NAME TEST_SOURCES TEST_TARGET)
       $<$<CXX_COMPILER_ID:MSVC>:
         /bigobj # number of sections exceeded object file format limit: compile with /bigobj
       >
+      $<$<COMPILE_LANGUAGE:HIP>:$<$<HIP_COMPILER_ID:MSVC>:/bigobj>>
   )
 
   set_target_properties(${TEST_TARGET}
@@ -217,17 +214,44 @@ ${TEST_TYPE_SLICE_COUNT} test type slice(s) for test target ${TEST_TARGET}")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${SOURCES})
 endfunction()
 
+function(add_rocprim_cpp_standard_test STANDARD EXTENSIONS TARGET_SUFFIX TEST_NAME TEST_SOURCES)
+  get_rocprim_test_target(${TEST_SOURCES} TEST_TARGET)
+  set(TEST_TARGET ${TEST_TARGET}${TARGET_SUFFIX})
+  add_rocprim_test_internal(${TEST_NAME}${TARGET_SUFFIX} "${TEST_SOURCES}" ${TEST_TARGET})
+  # Request C++ standard 17, but decay to a previous version if not available:
+  set_target_properties(${TEST_TARGET}
+    PROPERTIES
+    CXX_STANDARD ${STANDARD}
+    CXX_EXTENSIONS ${EXTENSIONS})
+  if(USE_HIPCXX)
+    set_target_properties(${TEST_TARGET}
+      PROPERTIES
+      HIP_STANDARD ${STANDARD}
+      HIP_EXTENSIONS ${EXTENSIONS})
+  endif()
+endfunction()
+
+function(add_rocprim_cpp17_test TEST_NAME TEST_SOURCES)
+  add_rocprim_cpp_standard_test(17 OFF "" ${TEST_NAME} ${TEST_SOURCES})
+endfunction()
+
 # ****************************************************************************
 # Tests
 # ****************************************************************************
+
+# Internal test to check internal behaviour
+add_rocprim_test("rocprim.internal_merge_path" "internal/test_internal_merge_path.cpp")
 
 # HIP basic test, which also checks if there are no linkage problems when there are multiple sources
 add_rocprim_test("rocprim.basic_test" "test_basic.cpp;detail/get_rocprim_version.cpp")
 
 add_rocprim_test("rocprim.arg_index_iterator" test_arg_index_iterator.cpp)
 add_rocprim_test("rocprim.temporary_storage_partitioning" test_temporary_storage_partitioning.cpp)
-add_rocprim_test_parallel("rocprim.block_adjacent_difference" test_block_adjacent_difference.cpp.in)
-add_rocprim_test_parallel("rocprim.block_discontinuity" test_block_discontinuity.cpp.in)
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # clang++ from ROCm 6.1+ takes too long to build these tests in Debug mode (which passes -O0)
+  add_rocprim_test_parallel("rocprim.block_adjacent_difference" test_block_adjacent_difference.cpp.in)
+  add_rocprim_test_parallel("rocprim.block_discontinuity" test_block_discontinuity.cpp.in)
+endif()
 add_rocprim_test("rocprim.block_exchange" test_block_exchange.cpp)
 add_rocprim_test("rocprim.block_histogram" test_block_histogram.cpp)
 add_rocprim_test("rocprim.block_load_store" test_block_load_store.cpp)
@@ -245,33 +269,46 @@ add_rocprim_test("rocprim.constant_iterator" test_constant_iterator.cpp)
 add_rocprim_test("rocprim.counting_iterator" test_counting_iterator.cpp)
 add_rocprim_test("rocprim.device_batch_memcpy" test_device_batch_memcpy.cpp)
 add_rocprim_test("rocprim.device_binary_search" test_device_binary_search.cpp)
+add_rocprim_test("rocprim.device_find_first_of" test_device_find_first_of.cpp)
 add_rocprim_test("rocprim.device_adjacent_difference" test_device_adjacent_difference.cpp)
+add_rocprim_test("rocprim.device_adjacent_find" test_device_adjacent_find.cpp)
+add_rocprim_test("rocprim.device_find_end" test_device_find_end.cpp)
 add_rocprim_test("rocprim.device_histogram" test_device_histogram.cpp)
 add_rocprim_test("rocprim.device_merge" test_device_merge.cpp)
 add_rocprim_test("rocprim.device_merge_sort" test_device_merge_sort.cpp)
+add_rocprim_cpp17_test("rocprim.nth_element" test_device_nth_element.cpp)
+add_rocprim_cpp17_test("rocprim.device_partial_sort" test_device_partial_sort.cpp)
 add_rocprim_test("rocprim.device_partition" test_device_partition.cpp)
 add_rocprim_test_parallel("rocprim.device_radix_sort" test_device_radix_sort.cpp.in)
 add_rocprim_test("rocprim.device_reduce_by_key" test_device_reduce_by_key.cpp)
 add_rocprim_test("rocprim.device_reduce" test_device_reduce.cpp)
 add_rocprim_test("rocprim.device_run_length_encode" test_device_run_length_encode.cpp)
 add_rocprim_test("rocprim.device_scan" test_device_scan.cpp)
+add_rocprim_test("rocprim.device_search" test_device_search.cpp)
 add_rocprim_test_parallel("rocprim.device_segmented_radix_sort" test_device_segmented_radix_sort.cpp.in)
+add_rocprim_test("rocprim.device_search_n" test_device_search_n.cpp)
 add_rocprim_test("rocprim.device_segmented_reduce" test_device_segmented_reduce.cpp)
 add_rocprim_test("rocprim.device_segmented_scan" test_device_segmented_scan.cpp)
 add_rocprim_test("rocprim.device_select" test_device_select.cpp)
 add_rocprim_test("rocprim.device_transform" test_device_transform.cpp)
 add_rocprim_test("rocprim.discard_iterator" test_discard_iterator.cpp)
+add_rocprim_test("rocprim.lookback_reproducibility" test_lookback_reproducibility.cpp)
 add_rocprim_test("rocprim.radix_key_codec" test_radix_key_codec.cpp)
 add_rocprim_test("rocprim.predicate_iterator" test_predicate_iterator.cpp)
 add_rocprim_test("rocprim.reverse_iterator" test_reverse_iterator.cpp)
-if(NOT USE_HIP_CPU)
 add_rocprim_test("rocprim.texture_cache_iterator" test_texture_cache_iterator.cpp)
-endif()
 add_rocprim_test("rocprim.thread" test_thread.cpp)
 add_rocprim_test("rocprim.thread_algos" test_thread_algos.cpp)
 add_rocprim_test("rocprim.transform_iterator" test_transform_iterator.cpp)
+add_rocprim_cpp_standard_test(14 OFF "_cpp14" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
+add_rocprim_cpp_standard_test(14 ON "_gnupp14" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
+add_rocprim_cpp_standard_test(17 OFF "_cpp17" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
+add_rocprim_cpp_standard_test(17 ON "_gnupp17" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
+add_rocprim_cpp_standard_test(20 OFF "_cpp20" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
+add_rocprim_cpp_standard_test(20 ON "_gnupp20" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
 add_rocprim_test("rocprim.no_half_operators" test_no_half_operators.cpp)
 add_rocprim_test("rocprim.intrinsics" test_intrinsics.cpp)
+add_rocprim_test("rocprim.intrinsics_atomic" test_intrinsics_atomic.cpp)
 add_rocprim_test("rocprim.invoke_result" test_invoke_result.cpp)
 add_rocprim_test("rocprim.warp_exchange" test_warp_exchange.cpp)
 add_rocprim_test("rocprim.warp_load" test_warp_load.cpp)

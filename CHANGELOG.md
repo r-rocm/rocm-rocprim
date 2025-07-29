@@ -1,17 +1,114 @@
 # Changelog for rocPRIM
 
-Documentation for rocPRIM is available at
-[https://rocm.docs.amd.com/projects/rocPRIM/en/latest/](https://rocm.docs.amd.com/projects/rocPRIM/en/latest/).
+Full documentation for rocPRIM is available at [https://rocm.docs.amd.com/projects/rocPRIM/en/latest/](https://rocm.docs.amd.com/projects/rocPRIM/en/latest/).
 
-## rocPRIM-3.2.2 for ROCm 6.2.4
+## rocPRIM 3.4.1 for ROCm 6.4.2
 
-### Additions
-* GFX1151 Support
+### Upcoming changes
+* Changes to the template parameters of warp and block algorithms will be made in an upcoming release.
 
-## rocPRIM-3.2.1 for ROCm 6.2.1
+### Deprecations
+* Due to an upcoming compiler change the following warp size-related symbols will be removed in the next major release and are thus marked as deprecated:
+  * `rocprim::device_warp_size()`
+    * For compile-time constants, this is replaced with `rocprim::arch::wavefront::min_size()` and `rocprim::arch::wavefront::max_size()`. Use this when allocating global or shared memory.
+    * For run-time constants, this is replaced with `rocprim::arch::wavefront::size().`
+  * `rocprim::warp_size()`
+  * `ROCPRIM_WAVEFRONT_SIZE
+  
+## rocPRIM 3.4.0 for ROCm 6.4.0
+
+### Added
+
+* Added extended tests to `rtest.py`. These tests are extra tests that did not fit the criteria of smoke and regression tests. These tests will take much longer to run relative to smoke and regression tests.
+ * Use `python rtest.py [--emulation|-e|--test|-t]=extended` to run these tests.
+* Added regression tests to `rtest.py`. Regression tests are a subset of tests that caused hardware problems for past emulation environments.
+  * Can be run with `python rtest.py [--emulation|-e|--test|-t]=regression`
+* Added the parallel `find_first_of` device function with autotuned configurations, this function is similar to `std::find_first_of`, it searches for the first occurrence of any of the provided elements.
+* Added `--emulation` option added for `rtest.py`
+  * Unit tests can be run with `[--emulation|-e|--test|-t]=<test_name>`
+* Added tuned configurations for segmented radix sort for gfx942 to improve performance on this architecture.
+* Added a parallel device-level function, `rocprim::adjacent_find`, similar to the C++ Standard Library `std::adjacent_find` algorithm.
+* Added configuration autotuning to device adjacent find (`rocprim::adjacent_find`) for improved performance on selected architectures.
+* Added rocprim::numeric_limits which is an extension of `std::numeric_limits`, which includes support for 128-bit integers.
+* Added rocprim::int128_t and rocprim::uint128_t which are the __int128_t and __uint128_t types.
+* Added the parallel `search` and `find_end` device functions similar to `std::search` and `std::find_end`, these functions search for the first and last occurrence of the sequence respectively.
+* Added a parallel device-level function, `rocprim::search_n`, similar to the C++ Standard Library `std::search_n` algorithm.
+* Added new constructors and a `base` function, and added `constexpr` specifier to all functions in `rocprim::reverse_iterator` to improve parity with the C++17 `std::reverse_iterator`.
+* Added hipGraph support to device run-length-encode for non trivial runs (`rocprim::run_length_encode_non_trivial_runs`).
+* Added configuration autotuning to device run-length-encode for non trivial runs (`rocprim::run_length_encode_non_trivial_runs`) for improved performance on selected architectures.
+* Added configuration autotuning to device run-length-encode for trivial runs (`rocprim::run_length_encode`) for improved performance on selected architectures.
+* Added a new type traits interface to enable users to provide additional type trait information to rocPRIM, facilitating better compatibility with custom types.
+
+### Changed
+
+* Changed the subset of tests that are run for smoke tests such that the smoke test will complete with faster run-time and to never exceed 2GB of vram usage. Use `python rtest.py [--emulation|-e|--test|-t]=smoke` to run these tests.
+* The `rtest.py` options have changed. `rtest.py` is now run with at least either `--test|-t` or `--emulation|-e`, but not both options.
+* Changed the internal algorithm of block radix sort to use rank match to improve performance of various radix sort related algorithms.
+* Disabled padding in various cases where higher occupancy resulted in better performance despite more bank conflicts.
+
+* Removed HIP-CPU support. HIP-CPU support was experimental and broken.
+* Changed the C++ version from 14 to 17. C++14 will be deprecated in the next major release.
+* You can use CMake HIP language support with CMake 3.18 and later. To use HIP language support, run `cmake` with `-DUSE_HIPCXX=ON` instead of setting the `CXX` variable to the path to a HIP-aware compiler.
+
+### Resolved issues
+
+* Fixed an issue where `rmake.py` would generate wrong CMAKE commands while using Linux environment
+* Fixed an issue where `rocprim::partial_sort_copy` would yield a compile error if the input iterator is const.
+* Fixed incorrect 128-bit signed and unsigned integers type traits.
+* Fixed compilation issue when `rocprim::radix_key_codec<...>` is specialized with a 128-bit integer.
+* Fixed the warp-level reduction `rocprim::warp_reduce.reduce` DPP implementation to avoid undefined intermediate values during the reduction.
+* Fixed an issue that caused a segmentation fault when `hipStreamLegacy` was passed to some API functions.
+
+### Upcoming changes
+* Using the initialisation constructor of `rocprim::reverse_iterator` will throw a deprecation warning. It will be marked as explicit in the next major release.
+
+* Using the initialisation constructor of rocprim::reverse_iterator will throw a deprecation warning. It will be marked as explicit in the next major release.
+
+## rocPRIM 3.3.0 for ROCm 6.3.0
+
+### Added
+
+* Changed the default value of `rmake.py -a` to `default_gpus`. This is equivalent to `gfx906:xnack-,gfx1030,gfx1100,gfx1101,gfx1102,gfx1151,gfx1200,gfx1201`.
+* The `--test smoke` option has been added to `rtest.py`. When `rtest.py` is called with this option it runs a subset of tests such that the total test time is 5 minutes. Use `python3 ./rtest.py --test smoke` or `python3 ./rtest.py -t smoke` to run the smoke test.
+* The `--seed` option has been added to `run_benchmarks.py`. The `--seed` option specifies a seed for the generation of random inputs. When the option is omitted, the default behavior is to use a random seed for each benchmark measurement.
+* Added configuration autotuning to device partition (`rocprim::partition`, `rocprim::partition_two_way`, and `rocprim::partition_three_way`), to device select (`rocprim::select`, `rocprim::unique`, and `rocprim::unique_by_key`), and to device reduce by key (`rocprim::reduce_by_key`) to improve performance on selected architectures.
+* Added `rocprim::uninitialized_array` to provide uninitialized storage in local memory for user-defined types.
+* Added large segment support for `rocprim:segmented_reduce`.
+* Added a parallel `nth_element` device function similar to `std::nth_element`. `nth_element` places elements that are smaller than the nth element before the nth element, and elements that are bigger than the nth element after the nth element.
+* Added deterministic (bitwise reproducible) algorithm variants `rocprim::deterministic_inclusive_scan`, `rocprim::deterministic_exclusive_scan`, `rocprim::deterministic_inclusive_scan_by_key`, `rocprim::deterministic_exclusive_scan_by_key`, and `rocprim::deterministic_reduce_by_key`. These provide run-to-run stable results with non-associative operators such as float operations, at the cost of reduced performance.
+* Added a parallel `partial_sort` and `partial_sort_copy` device functions similar to `std::partial_sort` and `std::partial_sort_copy`. `partial_sort` and `partial_sort_copy` arrange elements such that the elements are in the same order as a sorted list up to and including the middle index.
+
+### Changed
+
+* Modified the input size in device adjacent difference benchmarks. Observed performance with these benchmarks might be different.
+* Changed the default seed for `device_benchmark_segmented_reduce`.
+* Changed `test_utils_hipgraphs.hpp` to be a class `GraphHelper` with internal graph and graph instances
+
+### Removed
+
+* `rocprim::thread_load()` and `rocprim::thread_store()` have been deprecated. Use `dereference()` instead.
+
+### Resolved issues
+
+* Fixed an issue in `rmake.py` where the list storing cmake options would contain individual characters instead of a full string of options.
+* Resolved an issue in `rtest.py` where it crashed if the `build` folder was created without `release` or `debug` subdirectories.
+* Resolved an issue with `rtest.py` on Windows where passing an absolute path to `--install_dir` caused a `FileNotFound` error.
+* rocPRIM functions are no longer forcefully inlined on Windows. This significantly reduces the build
+  time of debug builds.
+* `block_load`, `block_store`, `block_shuffle`, `block_exchange`, and `warp_exchange` now use placement `new` instead of copy assignment (`operator=`) when writing to local memory. This fixes the behavior of custom types with non-trivial copy assignments.
+* Fixed a bug in the generation of input data for benchmarks, which caused incorrect performance to be reported in specific cases. It may affect the reported performance for one-byte types (`uint8_t` and `int8_t`) and instantiations of `custom_type`. Specifically, device binary search, device histogram, device merge and warp sort are affected.
+* Fixed a bug for `rocprim::merge_path_search` where using `unsigned` offsets would produce incorrect results.
+* Fixed a bug for `rocprim::thread_load` and `rocprim::thread_store` where `float` and `double` were not cast to the correct type, resulting in incorrect results.
+* Resolved an issue where tests where failing when they were compiled with `-D_GLIBCXX_ASSERTIONS=ON`.
+* Resolved an issue where algorithms that used an internal serial merge routine caused a memory access fault that resulted in potential performance drops when using block sort, device merge sort (block merge), device merge, device partial sort, and device sort (merge sort).
+* Fixed memory leaks in unit tests due to missing calls to `hipFree()` and the incorrect use of hipGraphs.
+* Fixed an issue where certain inputs to `block_sort_merge()`, `device_merge_sort_merge_path()`, `device_merge()`, and `warp_sort_stable()` caused an assertion error during the call to `serial_merge()`.
+
+## rocPRIM 3.2.1 for ROCm 6.2.1
 
 ### Optimizations
-* Improved performance of block_reduce_warp_reduce when warp size == block size.
+
+* Improved performance of `block_reduce_warp_reduce` when warp size equals block size.
 
 ## rocPRIM-3.2.0 for ROCm 6.2.0
 
@@ -30,10 +127,10 @@ Documentation for rocPRIM is available at
 * New `rocprim::batch_copy` function added. Similar to `rocprim::batch_memcpy`, but copies by element, not with memcpy.
 * Added more test cases, to better cover supported data types.
 * Updated some tests to work with supported data types.
-* An optional `decomposer` argument for all member functions of `rocprim::block_radix_sort` and all functions of `device_radix_sort`. 
+* An optional `decomposer` argument for all member functions of `rocprim::block_radix_sort` and all functions of `device_radix_sort`.
   To sort keys of an user-defined type, a decomposer functor should be passed. The decomposer should produce a `rocprim::tuple`
   of references to arithmetic types from the key.
-* New `rocprim::predicate_iterator` which acts as a proxy for an underlying iterator based on a predicate. 
+* New `rocprim::predicate_iterator` which acts as a proxy for an underlying iterator based on a predicate.
   It iterates over proxies that holds the references to the underlying values, but only allow reading and writing if the predicate is `true`.
   It can be instantiated with:
   * `rocprim::make_predicate_iterator`
@@ -45,6 +142,7 @@ Documentation for rocPRIM is available at
 
 * Improved the performance of `warp_sort_shuffle` and `block_sort_bitonic`.
 * Created an optimized version of the `warp_exchange` functions `blocked_to_striped_shuffle` and `striped_to_blocked_shuffle` when the warpsize is equal to the items per thread.
+* Improved the performance of `device_transform`.
 
 ### Fixes
 

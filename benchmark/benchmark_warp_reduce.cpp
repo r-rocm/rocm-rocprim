@@ -41,8 +41,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 32;
+#ifndef DEFAULT_BYTES
+const size_t DEFAULT_BYTES = 1024 * 1024 * 32 * 4;
 #endif
 
 template<
@@ -140,22 +140,25 @@ auto execute_warp_reduce_kernel(T* input, T* output, Flag* flags,
     HIP_CHECK(hipGetLastError());
 }
 
-template<
-    bool AllReduce,
-    bool Segmented,
-    class T,
-    unsigned int WarpSize,
-    unsigned int BlockSize,
-    unsigned int Trials = 100
->
-void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
+template<bool AllReduce,
+         bool Segmented,
+         class T,
+         unsigned int WarpSize,
+         unsigned int BlockSize,
+         unsigned int Trials = 100>
+void run_benchmark(benchmark::State& state, size_t bytes, const managed_seed& seed, hipStream_t stream)
 {
     using flag_type = unsigned char;
 
+    // Calculate the number of elements 
+    size_t N = bytes / sizeof(T);
+
     const auto size = BlockSize * ((N + BlockSize - 1)/BlockSize);
 
-    std::vector<T> input = get_random_data<T>(size, T(0), T(10));
-    std::vector<flag_type> flags = get_random_data<flag_type>(size, 0, 1);
+    const auto     random_range = limit_random_range<T>(0, 10);
+    std::vector<T> input
+        = get_random_data<T>(size, random_range.first, random_range.second, seed.get_0());
+    std::vector<flag_type> flags = get_random_data<flag_type>(size, 0, 1, seed.get_1());
     T * d_input;
     flag_type * d_flags;
     T * d_output;
@@ -223,8 +226,9 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
                                   + ",ws:" #WS ",cfg:{bs:" #BS "}}")                          \
             .c_str(),                                                                         \
         run_benchmark<AllReduce, Segmented, T, WS, BS>,                                       \
-        stream,                                                                               \
-        size)
+        bytes,                                                                                 \
+        seed,                                                                                 \
+        stream)
 
 #define BENCHMARK_TYPE(type) \
     CREATE_BENCHMARK(type, 32, 64), \
@@ -234,8 +238,9 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
 
 template<bool AllReduce, bool Segmented>
 void add_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                    hipStream_t                                   stream,
-                    size_t                                        size)
+                    size_t                                        bytes,
+                    const managed_seed&                           seed,
+                    hipStream_t                                   stream)
 {
     std::vector<benchmark::internal::Benchmark*> bs =
     {
@@ -253,32 +258,36 @@ void add_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
 int main(int argc, char *argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
     parser.run_and_exit_if_error();
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size = parser.get<size_t>("size");
+    const size_t bytes = parser.get<size_t>("size");
     const int trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     // Add benchmarks
     std::vector<benchmark::internal::Benchmark*> benchmarks;
-    add_benchmarks<false, false>(benchmarks, stream, size);
-    add_benchmarks<true, false>(benchmarks, stream, size);
-    add_benchmarks<false, true>(benchmarks, stream, size);
+    add_benchmarks<false, false>(benchmarks, bytes, seed, stream);
+    add_benchmarks<true, false>(benchmarks, bytes, seed, stream);
+    add_benchmarks<false, true>(benchmarks, bytes, seed, stream);
 
     // Use manual timing
     for(auto& b : benchmarks)

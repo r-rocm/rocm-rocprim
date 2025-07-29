@@ -1,5 +1,8 @@
 # rocPRIM
 
+> [!NOTE]
+> The published documentation is available at [rocPRIM](https://rocm.docs.amd.com/projects/rocPRIM/en/latest/) in an organized, easy-to-read format, with search and a table of contents. The documentation source files reside in the `docs` folder of this repository. As with all ROCm projects, the documentation is open source. For more information on contributing to the documentation, see [Contribute to ROCm documentation](https://rocm.docs.amd.com/en/latest/contribute/contributing.html).
+
 rocPRIM is a header-only library that provides HIP parallel primitives. You can use this library to
 develop performant GPU-accelerated code on AMD ROCm platforms.
 
@@ -11,7 +14,7 @@ develop performant GPU-accelerated code on AMD ROCm platforms.
   * Including
     [HIP-clang](https://github.com/ROCm/HIP/blob/master/INSTALL.md#hip-clang)
     compiler
-* C++14
+* C++17
 * Python 3.6 or higher (HIP on Windows only, required only for install script)
 * Visual Studio 2019 with Clang support (HIP on Windows only)
 * Strawberry Perl (HIP on Windows only)
@@ -30,20 +33,47 @@ Optional:
 Documentation for rocPRIM is available at
 [https://rocm.docs.amd.com/projects/rocPRIM/en/latest/](https://rocm.docs.amd.com/projects/rocPRIM/en/latest/).
 
-To build our documentation locally, use the following code:
+### Build documentation locally
 
 ```shell
-# Go to rocPRIM docs directory
+# Change directory to rocPRIM docs
 cd rocPRIM; cd docs
 
-# Install Python dependencies
+# Install documentation dependencies
 python3 -m pip install -r sphinx/requirements.txt
 
 # Build the documentation
 python3 -m sphinx -T -E -b html -d _build/doctrees -D language=en . _build/html
 
-# For local HTML version
+# To serve the HTML docs locally
 cd _build/html
+python3 -m http.server
+```
+
+### Build documentation via CMake
+
+Install [rocm-cmake](https://github.com/ROCm/rocm-cmake/)
+
+```shell
+# Change directory to rocPRIM
+cd rocPRIM
+
+# Install documentation dependencies
+python3 -m pip install -r docs/sphinx/requirements.txt
+
+# Set C++ compiler
+# This example uses hipcc and assumes it is at the path /usr/bin
+export CXX=hipcc
+export PATH=/usr/bin:$PATH
+
+# Configure the project
+cmake -S . -B ./build -D BUILD_DOCS=ON
+
+# Build the documentation
+cmake --build ./build --target doc
+
+# To serve the HTML docs locally
+cd ./build/docs/html
 python3 -m http.server
 ```
 
@@ -80,11 +110,6 @@ You can build and install rocPRIM on Linux or Windows.
   # before 'cmake' or setting cmake option 'CMAKE_CXX_COMPILER' to path to the compiler.
   # Using HIP-clang:
   [CXX=hipcc] cmake -DBUILD_BENCHMARK=ON ../.
-  #
-  # ! EXPERIMENTAL !
-  # Alternatively one may build using the experimental (and highly incomplete) HIP-CPU back-end for host-side
-  # execution using any C++17 conforming compiler (supported by HIP-CPU). AMDGPU_* options are unavailable in this case. 
-  #   USE_HIP_CPU - OFF by default
 
   # Build
   make -j4
@@ -132,9 +157,15 @@ find_package(rocprim REQUIRED CONFIG PATHS "/opt/rocm/rocprim")
 # to be linked manually by user
 target_link_libraries(<your_target> roc::rocprim)
 
-# Includes rocPRIM headers and required HIP dependencies
-target_link_libraries(<your_target> roc::rocprim_hip)
+# Include rocPRIM headers and required HIP dependencies
+# - If using HIP language support (USE_HIPCXX=ON):
+target_link_libraries(<your_target> hip::host)
+
+# - Otherwise:
+target_link_libraries(<your_target> hip::device)
 ```
+
+For more information on `hip::host` and `hip::device`, please see the [ROCm documentation](https://rocm.docs.amd.com/en/latest/conceptual/cmake-packages.html#consuming-the-hip-api-in-c-code).
 
 ## Running unit tests
 

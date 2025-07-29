@@ -60,6 +60,8 @@ TEST(RocprimConfigDispatchTests, HostMatchesDevice)
 
     ASSERT_NE(host_arch, target_arch::invalid);
     ASSERT_EQ(host_arch, device_arch);
+
+    HIP_CHECK(hipFree(device_arch_ptr))
 }
 
 TEST(RocprimConfigDispatchTests, ParseCommonArches)
@@ -95,6 +97,12 @@ TEST(RocprimConfigDispatchTests, DeviceIdFromStream)
 
     HIP_CHECK(get_device_from_stream(hipStreamPerThread, result));
     ASSERT_EQ(result, device_id);
+
+    // hipStreamLegacy support was added in ROCm 6.1.0
+#if (HIP_VERSION_MAJOR >= 6 && HIP_VERSION_MINOR >= 1)
+    HIP_CHECK(get_device_from_stream(hipStreamLegacy, result));
+    ASSERT_EQ(result, device_id);
+#endif
 
     hipStream_t stream;
     HIP_CHECK(hipStreamCreate(&stream));

@@ -63,7 +63,7 @@ private:
     T* _ptr;
 };
 
-// Iterator used in tests to check situtations when value_type of the
+// Iterator used in tests to check situations when value_type of the
 // iterator is not the same as the return type of operator[].
 // It is a simplified version of device_vector::iterator from thrust.
 template<class T>
@@ -78,11 +78,13 @@ public:
 
     using iterator_category = std::random_access_iterator_tag;
 
-    ROCPRIM_HOST_DEVICE inline indirect_iterator(T* ptr) : ptr_(ptr) {}
+    ROCPRIM_HOST_DEVICE inline explicit indirect_iterator(T* ptr) : ptr_(ptr) {}
 
     ROCPRIM_HOST_DEVICE inline ~indirect_iterator() = default;
 
-    ROCPRIM_HOST_DEVICE inline indirect_iterator& operator++()
+    ROCPRIM_HOST_DEVICE
+    inline indirect_iterator&
+        operator++()
     {
         ++ptr_;
         return *this;
@@ -110,7 +112,7 @@ public:
 
     ROCPRIM_HOST_DEVICE inline reference operator*() const
     {
-        return *ptr_;
+        return reference{*ptr_};
     }
 
     ROCPRIM_HOST_DEVICE inline reference operator[](difference_type n) const
@@ -161,14 +163,14 @@ private:
     T* ptr_;
 };
 
-template<bool Wrap, class T>
+template<bool Wrap, typename T>
 inline auto wrap_in_indirect_iterator(T* ptr) ->
     typename std::enable_if<Wrap, indirect_iterator<T>>::type
 {
     return indirect_iterator<T>(ptr);
 }
 
-template<bool Wrap, class T>
+template<bool Wrap, typename T>
 inline auto wrap_in_indirect_iterator(T* ptr) -> typename std::enable_if<!Wrap, T*>::type
 {
     return ptr;

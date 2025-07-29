@@ -44,7 +44,7 @@
 #include <cstdlib>
 
 #ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 32;
+const size_t DEFAULT_BYTES = 1024 * 1024 * 32 * 4;
 #endif
 
 namespace rp = rocprim;
@@ -241,15 +241,16 @@ struct scatter_to_striped
     }
 };
 
-template<
-    class Benchmark,
-    class T,
-    unsigned int BlockSize,
-    unsigned int ItemsPerThread,
-    unsigned int Trials = 100
->
-void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
+template<class Benchmark,
+         class T,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         unsigned int Trials = 100>
+void run_benchmark(benchmark::State& state, size_t bytes, const managed_seed& seed, hipStream_t stream)
 {
+    // Calculate the number of elements N
+    size_t N = bytes / sizeof(T);
+    
     constexpr auto items_per_block = BlockSize * ItemsPerThread;
     const auto size = items_per_block * ((N + items_per_block - 1)/items_per_block);
 
@@ -261,7 +262,7 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
     }
     std::vector<unsigned int> ranks(size);
     // Fill ranks (for scatter operations)
-    std::mt19937 gen;
+    engine_type gen(seed.get_0());
     for(size_t bi = 0; bi < size / items_per_block; bi++)
     {
         auto block_ranks = ranks.begin() + bi * items_per_block;
@@ -334,8 +335,9 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
                                   + ",key_type:" #T ",cfg:{bs:" #BS ",ipt:" #IPT "}}") \
             .c_str(),                                                                  \
         run_benchmark<Benchmark, T, BS, IPT>,                                          \
-        stream,                                                                        \
-        size)
+        bytes,                                                                          \
+        seed,                                                                          \
+        stream)
 
 #define BENCHMARK_TYPE(type, block) \
     CREATE_BENCHMARK(type, block, 1), \
@@ -346,10 +348,11 @@ void run_benchmark(benchmark::State& state, hipStream_t stream, size_t N)
     CREATE_BENCHMARK(type, block, 8)
 
 template<class Benchmark>
-void add_benchmarks(const std::string& name,
+void add_benchmarks(const std::string&                            name,
                     std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                    hipStream_t stream,
-                    size_t size)
+                    size_t                                        bytes,
+                    const managed_seed&                           seed,
+                    hipStream_t                                   stream)
 {
     using custom_float2 = custom_type<float, float>;
     using custom_double2 = custom_type<double, double>;
@@ -373,35 +376,47 @@ void add_benchmarks(const std::string& name,
 int main(int argc, char *argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("bytes", "bytes", DEFAULT_BYTES, "number of values");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
     parser.run_and_exit_if_error();
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size = parser.get<size_t>("size");
+    const size_t bytes = parser.get<size_t>("bytes");
     const int trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     // Add benchmarks
     std::vector<benchmark::internal::Benchmark*> benchmarks;
-    add_benchmarks<blocked_to_striped>("blocked_to_striped", benchmarks, stream, size);
-    add_benchmarks<striped_to_blocked>("striped_to_blocked", benchmarks, stream, size);
-    add_benchmarks<blocked_to_warp_striped>("blocked_to_warp_striped", benchmarks, stream, size);
-    add_benchmarks<warp_striped_to_blocked>("warp_striped_to_blocked", benchmarks, stream, size);
-    add_benchmarks<scatter_to_blocked>("scatter_to_blocked", benchmarks, stream, size);
-    add_benchmarks<scatter_to_striped>("scatter_to_striped", benchmarks, stream, size);
+    add_benchmarks<blocked_to_striped>("blocked_to_striped", benchmarks, bytes, seed, stream);
+    add_benchmarks<striped_to_blocked>("striped_to_blocked", benchmarks, bytes, seed, stream);
+    add_benchmarks<blocked_to_warp_striped>("blocked_to_warp_striped",
+                                            benchmarks,
+                                            bytes,
+                                            seed,
+                                            stream);
+    add_benchmarks<warp_striped_to_blocked>("warp_striped_to_blocked",
+                                            benchmarks,
+                                            bytes,
+                                            seed,
+                                            stream);
+    add_benchmarks<scatter_to_blocked>("scatter_to_blocked", benchmarks, bytes, seed, stream);
+    add_benchmarks<scatter_to_striped>("scatter_to_striped", benchmarks, bytes, seed, stream);
 
     // Use manual timing
     for(auto& b : benchmarks)

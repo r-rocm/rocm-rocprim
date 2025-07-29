@@ -25,6 +25,7 @@
 
 #include "../config.hpp"
 #include "../detail/various.hpp"
+#include "../intrinsics/arch.hpp"
 
 BEGIN_ROCPRIM_NAMESPACE
 
@@ -33,25 +34,31 @@ BEGIN_ROCPRIM_NAMESPACE
 
 // Sizes
 
-/// \brief [DEPRECATED] Returns a number of threads in a hardware warp.
+/// \brief Returns a number of threads in a hardware warp.
 ///
 /// It is constant for a device.
-/// This function is not supported for the gfx1030 architecture and will be removed in a future release.
-/// Please use the new host_warp_size() and device_warp_size() functions.
-ROCPRIM_HOST_DEVICE inline
-constexpr unsigned int warp_size()
+///
+/// \warning This function will be removed in a future release.
+[[deprecated(
+     "Use the functions provided in 'rocprim::arch::wavefront' instead.")]]
+ROCPRIM_HOST_DEVICE
+inline constexpr unsigned int warp_size()
 {
-    return warpSize;
+    return ROCPRIM_WAVEFRONT_SIZE;
 }
 
 /// \brief Returns a number of threads in a hardware warp for the actual target.
 /// At device side this constant is available at compile time.
 ///
 /// It is constant for a device.
+///
+/// \warning This function will be removed in a future release.
+[[deprecated("Use the functions provided in 'rocprim::arch::wavefront' "
+             "instead.")]]
 ROCPRIM_DEVICE ROCPRIM_INLINE
 constexpr unsigned int device_warp_size()
 {
-    return warpSize;
+    return ROCPRIM_WAVEFRONT_SIZE;
 }
 
 /// \brief Returns flat size of a multidimensional block (tile).
@@ -74,12 +81,7 @@ unsigned int flat_tile_size()
 ROCPRIM_DEVICE ROCPRIM_INLINE
 unsigned int lane_id()
 {
-#ifndef __HIP_CPU_RT__
     return ::__lane_id();
-#else
-    using namespace hip::detail;
-    return id(Fiber::this_fiber()) % warpSize;
-#endif
 }
 
 /// \brief Returns flat (linear, 1D) thread identifier in a multidimensional block (tile).
@@ -132,7 +134,7 @@ unsigned int flat_tile_thread_id()
 ROCPRIM_DEVICE ROCPRIM_INLINE
 unsigned int warp_id()
 {
-    return flat_block_thread_id()/device_warp_size();
+    return flat_block_thread_id()/arch::wavefront::size();
 }
 
 /// \brief Returns warp id in a block (tile), given the flat (linear, 1D) thread identifier in a multidimensional tile (block).
@@ -140,7 +142,7 @@ unsigned int warp_id()
 ROCPRIM_DEVICE ROCPRIM_INLINE
 unsigned int warp_id(unsigned int flat_id)
 {
-    return flat_id/device_warp_size();
+    return flat_id/arch::wavefront::size();
 }
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
@@ -150,7 +152,7 @@ template<unsigned int BlockSizeX, unsigned int BlockSizeY, unsigned int BlockSiz
 ROCPRIM_DEVICE ROCPRIM_INLINE
 unsigned int warp_id()
 {
-    return flat_block_thread_id<BlockSizeX, BlockSizeY, BlockSizeZ>()/device_warp_size();
+    return flat_block_thread_id<BlockSizeX, BlockSizeY, BlockSizeZ>()/arch::wavefront::size();
 }
 #endif // DOXYGEN_SHOULD_SKIP_THIS
 
@@ -305,7 +307,7 @@ namespace detail
 
     template<>
     ROCPRIM_DEVICE ROCPRIM_INLINE
-    unsigned int logical_lane_id<device_warp_size()>()
+    unsigned int logical_lane_id<arch::wavefront::min_size()>()
     {
         return lane_id();
     }
@@ -320,7 +322,7 @@ namespace detail
 
     template<>
     ROCPRIM_DEVICE ROCPRIM_INLINE
-    unsigned int logical_warp_id<device_warp_size()>()
+    unsigned int logical_warp_id<arch::wavefront::min_size()>()
     {
         return warp_id();
     }
@@ -341,13 +343,6 @@ namespace detail
     void memory_fence_device()
     {
         ::__threadfence();
-        // Hotfix: On GFX10 (Navi 10/RDNA1, Navi 20/RDNA2) ISA and GFX11 ISA (Navi 30 GPUs),
-        // the compiler emits the L0 and L1 invalidate in the wrong order.
-        //
-        // See: https://github.com/llvm/llvm-project/pull/81450
-#if defined(__GFX10__) || defined(__GFX11__)
-        asm volatile("buffer_gl0_inv");
-#endif
     }
 }
 

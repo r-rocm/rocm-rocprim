@@ -8,6 +8,7 @@ subtrees:
     - entries:
       - file: concepts/intro.rst
       - file: concepts/glossary.rst
+      - file: concepts/tuning.rst
       - file: concepts/developer.rst
   - file: reference/reference.rst
     title: API Reference
@@ -22,17 +23,24 @@ subtrees:
           - file: device_ops/transform.rst
           - file: device_ops/unique.rst
           - file: device_ops/sort.rst
+          - file: device_ops/partial_sort.rst
+          - file: device_ops/nth_element.rst
           - file: device_ops/merge.rst
           - file: device_ops/partition.rst
           - file: device_ops/run_length_encoding.rst
           - file: device_ops/scan.rst
+          - file: device_ops/search_n.rst
           - file: device_ops/select.rst
           - file: device_ops/reduce.rst
           - file: device_ops/adjacent_difference.rst
+          - file: device_ops/adjacent_find.rst
           - file: device_ops/binary_search.rst
           - file: device_ops/histogram.rst
           - file: device_ops/device_copy.rst
           - file: device_ops/memcpy.rst
+          - file: device_ops/find_first_of.rst
+          - file: device_ops/find_end.rst
+          - file: device_ops/search.rst
       - file: block_ops/index.rst
         subtrees:
         - entries: 
@@ -64,8 +72,15 @@ subtrees:
         subtrees:
         - entries:
           - file: thread_ops/radix_key_codec.rst
-      - file: reference/thread_ops.rst
+          - file: thread_ops/thread_operators.rst
+          - file: thread_ops/thread_load.rst
+          - file: thread_ops/thread_reduce.rst
+          - file: thread_ops/thread_scan.rst
+          - file: thread_ops/thread_search.rst
+          - file: thread_ops/thread_store.rst
       - file: reference/iterators.rst
       - file: reference/intrinsics.rst
+      - file: concepts/type_traits.rst
+      - file: reference/types.rst
       - file: reference/acknowledge.rst
   - file: license.rst

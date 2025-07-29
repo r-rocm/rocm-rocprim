@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,6 +27,7 @@
 #include <type_traits>
 
 #include "../config.hpp"
+#include "../common.hpp"
 #include "../detail/various.hpp"
 #include "../functional.hpp"
 
@@ -123,23 +124,6 @@ ROCPRIM_KERNEL __launch_bounds__(
                                      bins_bits);
 }
 
-#define ROCPRIM_DETAIL_HIP_SYNC_AND_RETURN_ON_ERROR(name, size, start)                           \
-    {                                                                                            \
-        auto _error = hipGetLastError();                                                         \
-        if(_error != hipSuccess)                                                                 \
-            return _error;                                                                       \
-        if(debug_synchronous)                                                                    \
-        {                                                                                        \
-            std::cout << name << "(" << size << ")";                                             \
-            auto __error = hipStreamSynchronize(stream);                                         \
-            if(__error != hipSuccess)                                                            \
-                return __error;                                                                  \
-            auto _end = std::chrono::high_resolution_clock::now();                               \
-            auto _d   = std::chrono::duration_cast<std::chrono::duration<double>>(_end - start); \
-            std::cout << " " << _d.count() * 1000 << " ms" << '\n';                              \
-        }                                                                                        \
-    }
-
 template<unsigned int Channels,
          unsigned int ActiveChannels,
          class Config,
@@ -217,11 +201,11 @@ inline hipError_t histogram_impl(void*          temporary_storage,
         max_bins = std::max(max_bins, bins[channel]);
     }
 
-    std::chrono::high_resolution_clock::time_point start;
+    std::chrono::steady_clock::time_point start;
 
     if(debug_synchronous)
     {
-        start = std::chrono::high_resolution_clock::now();
+        start = std::chrono::steady_clock::now();
     }
     hipLaunchKernelGGL(HIP_KERNEL_NAME(init_histogram_kernel<config, ActiveChannels>),
                        dim3(::rocprim::detail::ceiling_div(max_bins, block_size)),
@@ -241,7 +225,7 @@ inline hipError_t histogram_impl(void*          temporary_storage,
     {
         if(debug_synchronous)
         {
-            start = std::chrono::high_resolution_clock::now();
+            start = std::chrono::steady_clock::now();
         }
         auto kernel = HIP_KERNEL_NAME(histogram_shared_kernel<config,
                                                               Channels,
@@ -318,7 +302,7 @@ inline hipError_t histogram_impl(void*          temporary_storage,
     {
         if(debug_synchronous)
         {
-            start = std::chrono::high_resolution_clock::now();
+            start = std::chrono::steady_clock::now();
         }
         hipLaunchKernelGGL(
             HIP_KERNEL_NAME(histogram_global_kernel<config, Channels, ActiveChannels>),
@@ -436,7 +420,7 @@ inline hipError_t histogram_range_impl(void*          temporary_storage,
                                                             debug_synchronous);
 }
 
-#undef ROCPRIM_DETAIL_HIP_SYNC_AND_RETURN_ON_ERROR
+
 
 } // namespace detail
 
@@ -449,7 +433,7 @@ inline hipError_t histogram_range_impl(void*          temporary_storage,
 /// * Returns the required size of \p temporary_storage in \p storage_size
 /// if \p temporary_storage in a null pointer.
 ///
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -552,7 +536,7 @@ inline hipError_t histogram_even(void*          temporary_storage,
 /// * Returns the required size of \p temporary_storage in \p storage_size
 /// if \p temporary_storage in a null pointer.
 ///
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -663,7 +647,7 @@ inline hipError_t histogram_even(void*          temporary_storage,
 ///
 /// \tparam Channels - number of channels interleaved in the input samples.
 /// \tparam ActiveChannels - number of channels being used for computing histograms.
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -685,6 +669,13 @@ inline hipError_t histogram_even(void*          temporary_storage,
 ///
 /// \returns \p hipSuccess (\p 0) after successful histogram operation; otherwise a HIP runtime error of
 /// type \p hipError_t.
+///
+/// \par Notes
+/// * Currently the \p Channels template parameter has no strict restriction on its value. However,
+///   internally a vector type of elements of type \p SampleIterator and length \p Channels is used
+///   to represent the input items, so the amount of local memory available will limit the range of
+///   possible values for this template parameter.
+/// * \p ActiveChannels must be less or equal than \p Channels.
 ///
 /// \par Example
 /// \parblock
@@ -775,7 +766,7 @@ inline hipError_t multi_histogram_even(void*          temporary_storage,
 ///
 /// \tparam Channels - number of channels interleaved in the input samples.
 /// \tparam ActiveChannels - number of channels being used for computing histograms.
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -799,6 +790,13 @@ inline hipError_t multi_histogram_even(void*          temporary_storage,
 ///
 /// \returns \p hipSuccess (\p 0) after successful histogram operation; otherwise a HIP runtime error of
 /// type \p hipError_t.
+///
+/// \par Notes
+/// * Currently the \p Channels template parameter has no strict restriction on its value. However,
+///   internally a vector type of elements of type \p SampleIterator and length \p Channels is used
+///   to represent the input items, so the amount of local memory available will limit the range of
+///   possible values for this template parameter.
+/// * \p ActiveChannels must be less or equal than \p Channels.
 ///
 /// \par Example
 /// \parblock
@@ -882,7 +880,7 @@ inline hipError_t multi_histogram_even(void*          temporary_storage,
 /// * Returns the required size of \p temporary_storage in \p storage_size
 /// if \p temporary_storage in a null pointer.
 ///
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -979,7 +977,7 @@ inline hipError_t histogram_range(void*          temporary_storage,
 /// * Returns the required size of \p temporary_storage in \p storage_size
 /// if \p temporary_storage in a null pointer.
 ///
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -1085,7 +1083,7 @@ inline hipError_t histogram_range(void*          temporary_storage,
 ///
 /// \tparam Channels - number of channels interleaved in the input samples.
 /// \tparam ActiveChannels - number of channels being used for computing histograms.
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -1106,6 +1104,13 @@ inline hipError_t histogram_range(void*          temporary_storage,
 ///
 /// \returns \p hipSuccess (\p 0) after successful histogram operation; otherwise a HIP runtime error of
 /// type \p hipError_t.
+///
+/// \par Notes
+/// * Currently the \p Channels template parameter has no strict restriction on its value. However,
+///   internally a vector type of elements of type \p SampleIterator and length \p Channels is used
+///   to represent the input items, so the amount of local memory available will limit the range of
+///   possible values for this template parameter.
+/// * \p ActiveChannels must be less or equal than \p Channels.
 ///
 /// \par Example
 /// \parblock
@@ -1192,7 +1197,7 @@ inline hipError_t multi_histogram_range(void*          temporary_storage,
 ///
 /// \tparam Channels - number of channels interleaved in the input samples.
 /// \tparam ActiveChannels - number of channels being used for computing histograms.
-/// \tparam Config - [optional] configuration of the primitive. It has to be \p histogram_config or a class derived from it.
+/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `histogram_config`.
 /// \tparam SampleIterator - random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam Counter - integer type for histogram bin counters.
@@ -1215,6 +1220,13 @@ inline hipError_t multi_histogram_range(void*          temporary_storage,
 ///
 /// \returns \p hipSuccess (\p 0) after successful histogram operation; otherwise a HIP runtime error of
 /// type \p hipError_t.
+///
+/// \par Notes
+/// * Currently the \p Channels template parameter has no strict restriction on its value. However,
+///   internally a vector type of elements of type \p SampleIterator and length \p Channels is used
+///   to represent the input items, so the amount of local memory available will limit the range of
+///   possible values for this template parameter.
+/// * \p ActiveChannels must be less or equal than \p Channels.
 ///
 /// \par Example
 /// \parblock

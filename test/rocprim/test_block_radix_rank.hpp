@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2022 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -129,6 +129,7 @@ void test_block_radix_rank()
     SCOPED_TRACE(testing::Message() << "with start_bit = " << start_bit);
     SCOPED_TRACE(testing::Message() << "with max_radix_bits = " << MaxRadixBits);
     SCOPED_TRACE(testing::Message() << "with radix_bits = " << radix_bits);
+    SCOPED_TRACE(testing::Message() << "with grid_size = " << size);
     SCOPED_TRACE(testing::Message() << "with size = " << size);
 
     for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; ++seed_index)
@@ -138,18 +139,11 @@ void test_block_radix_rank()
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> keys_input;
-        if(rocprim::is_floating_point<T>::value)
-        {
-            keys_input = test_utils::get_random_data<T>(size, T(-1000), T(+1000), seed_value);
-        }
-        else
-        {
-            keys_input = test_utils::get_random_data<T>(size,
-                                                        std::numeric_limits<T>::min(),
-                                                        std::numeric_limits<T>::max(),
-                                                        seed_value);
-        }
+        std::vector<T> keys_input
+            = test_utils::get_random_data<T>(size,
+                                             test_utils::generate_limits<T>::min(),
+                                             test_utils::generate_limits<T>::max(),
+                                             seed_value);
 
         // Calculated expected results on host
         std::vector<unsigned int> expected(size);
@@ -224,14 +218,17 @@ struct static_for
 
     static void run()
     {
-        test_block_radix_rank<T,
-                              BlockSize,
-                              items_per_thread[First],
-                              pass_start_bit[First],
-                              max_radix_bits[First],
-                              radix_bits,
-                              rank_desc[First],
-                              Algorithm>();
+        {
+            SCOPED_TRACE(testing::Message() << "TestID = " << First);
+            test_block_radix_rank<T,
+                                  BlockSize,
+                                  items_per_thread[First],
+                                  pass_start_bit[First],
+                                  max_radix_bits[First],
+                                  radix_bits,
+                                  rank_desc[First],
+                                  Algorithm>();
+        }
         static_for<First + 1, Last, T, BlockSize, Algorithm>::run();
     }
 };

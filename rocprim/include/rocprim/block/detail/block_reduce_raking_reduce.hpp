@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,7 @@
 #include "../../intrinsics.hpp"
 
 #include "../../warp/warp_reduce.hpp"
+#include "rocprim/intrinsics/arch.hpp"
 
 BEGIN_ROCPRIM_NAMESPACE
 
@@ -72,15 +73,9 @@ public:
         for(int i = 0; i < words_no; i++)
         {
             const size_t s = std::min(sizeof(int32_t), sizeof(T) - i * sizeof(int32_t));
-#ifdef __HIP_CPU_RT__
-            std::memcpy(reinterpret_cast<char*>(&result) + i * sizeof(int32_t),
-                        data + index + i * n,
-                        s);
-#else
             __builtin_memcpy(reinterpret_cast<char*>(&result) + i * sizeof(int32_t),
                              data + index + i * n,
                              s);
-#endif
         }
         return result;
     }
@@ -91,15 +86,9 @@ public:
         for(int i = 0; i < words_no; i++)
         {
             const size_t s = std::min(sizeof(int32_t), sizeof(T) - i * sizeof(int32_t));
-#ifdef __HIP_CPU_RT__
-            std::memcpy(data + index + i * n,
-                        reinterpret_cast<const char*>(&value) + i * sizeof(int32_t),
-                        s);
-#else
             __builtin_memcpy(data + index + i * n,
                              reinterpret_cast<const char*>(&value) + i * sizeof(int32_t),
                              s);
-#endif
         }
     }
 
@@ -122,7 +111,7 @@ class block_reduce_raking_reduce
     // Warp reduce, warp_reduce_crosslane does not require shared memory (storage), but
     // logical warp size must be a power of two.
     static constexpr unsigned int warp_size_
-        = detail::get_min_warp_size(BlockSize, ::rocprim::device_warp_size());
+        = detail::get_min_warp_size(BlockSize, ::rocprim::arch::wavefront::min_size());
 
     static constexpr unsigned int segment_len = ceiling_div(BlockSize, warp_size_);
 
@@ -136,7 +125,9 @@ class block_reduce_raking_reduce
     };
 
 public:
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
     using storage_type = detail::raw_storage<storage_type_>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     /// \brief Computes a thread block-wide reduction using specified reduction operator. The return value is only valid for thread<sub>0</sub>.
     /// \param input     [in]  Calling thread's input to be reduced
