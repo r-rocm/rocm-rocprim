@@ -34,18 +34,18 @@ ROCM_MATH_CMAKE_PARAMS += -DBUILD_FILE_REORG_BACKWARD_COMPATIBILITY=OFF
 
 # GPU_TARGETS="gfx908:xnack-;gfx90a:xnack-;gfx90a:xnack+;gfx940;gfx941;gfx942;gfx1030;gfx1100"
 
+# Build specific gpu target and no test to accelerate
+ROCPRIM_CMAKE_PARAMS := -DGPU_TARGETS="gfx1100"
+ROCPRIM_CMAKE_PARAMS += -DBUILD_BENCHMARK=OFF
+ROCPRIM_CMAKE_PARAMS += -DBUILD_SHARED_LIBS=ON
+ROCPRIM_CMAKE_PARAMS += -DBUILD_TEST=OFF
+ROCPRIM_CMAKE_PARAMS += -DCMAKE_MODULE_PATH="$(ROCM_PATH)/lib/cmake/hip"
+
 %:
 	dh $@
 
 override_dh_auto_configure:
-	cmake $(REVYOS_ROCM_CMAKE_PARAMS) \
-		$(ROCM_MATH_CMAKE_PARAMS) \
-		-DGPU_TARGETS="gfx1100" \
-		-DBUILD_BENCHMARK=OFF \
-		-DBUILD_SHARED_LIBS=ON \
-		-DBUILD_TEST=ON \
-		-DCMAKE_MODULE_PATH="$(ROCM_PATH)/lib/cmake/hip"
-
+	cmake $(REVYOS_ROCM_CMAKE_PARAMS) $(ROCM_MATH_CMAKE_PARAMS) $(ROCPRIM_CMAKE_PARAMS)
 
 override_dh_auto_build:
 	cmake --build $(DEB_BUILD_PATH) -- $(MAKEOPTS)
@@ -55,3 +55,6 @@ override_dh_auto_install:
 
 override_dh_install:
 	echo "dh_install skipped"
+
+override_dh_dwz:
+	:
