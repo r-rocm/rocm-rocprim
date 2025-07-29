@@ -53,6 +53,7 @@
 #include "rocprim/intrinsics.hpp"
 #include "rocprim/intrinsics/thread.hpp"
 
+#include "rocprim/common.hpp"
 #include "rocprim/config.hpp"
 
 #include <hip/hip_runtime.h>
@@ -112,8 +113,7 @@ template<bool IsMemCpy,
          typename std::enable_if<IsMemCpy, int>::type = 0>
 ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static Alias read_item(InputIt buffer_src, Offset offset)
 {
-    return rocprim::thread_load<rocprim::cache_load_modifier::load_cs>(
-        reinterpret_cast<Alias*>(buffer_src) + offset);
+    return *(reinterpret_cast<Alias*>(buffer_src) + offset);
 }
 
 template<bool IsMemCpy,
@@ -123,7 +123,7 @@ template<bool IsMemCpy,
          typename std::enable_if<!IsMemCpy, int>::type = 0>
 ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static Alias read_item(InputIt buffer_src, Offset offset)
 {
-    return rocprim::thread_load<rocprim::cache_load_modifier::load_cs>(buffer_src + offset);
+    return *(buffer_src + offset);
 }
 
 template<bool IsMemCpy,
@@ -134,9 +134,7 @@ template<bool IsMemCpy,
 ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static void
     write_item(InputIt buffer_dst, Offset offset, Alias value)
 {
-    rocprim::thread_store<rocprim::cache_store_modifier::store_cs>(
-        reinterpret_cast<Alias*>(buffer_dst) + offset,
-        value);
+    *(reinterpret_cast<Alias*>(buffer_dst) + offset) = value;
 }
 
 template<bool IsMemCpy,
@@ -147,7 +145,7 @@ template<bool IsMemCpy,
 ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static void
     write_item(InputIt buffer_dst, Offset offset, Alias value)
 {
-    rocprim::thread_store<rocprim::cache_store_modifier::store_cs>(buffer_dst + offset, value);
+    *(buffer_dst + offset) = value;
 }
 
 template<class VectorType>
@@ -200,7 +198,7 @@ ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static void vectorized_copy_bytes(const void
     using vector_type                      = uint4;
     constexpr uint32_t ints_in_vector_type = sizeof(uint4) / sizeof(uint32_t);
 
-    constexpr auto warp_size = rocprim::device_warp_size();
+    constexpr auto warp_size = rocprim::arch::wavefront::min_size();
     const auto     rank      = rocprim::detail::block_thread_id<0>() % warp_size;
 
     const uint8_t* src = reinterpret_cast<const uint8_t*>(input_buffer) + offset;
@@ -317,7 +315,7 @@ template<bool IsMemCpy,
 ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE static void
     copy_items(InputIt input_buffer, OutputIt output_buffer, Offset num_items, Offset offset = 0)
 {
-    constexpr auto warp_size = rocprim::device_warp_size();
+    constexpr auto warp_size = rocprim::arch::wavefront::min_size();
     output_buffer += offset;
     input_buffer += offset;
     for(Offset i = threadIdx.x % warp_size; i < num_items; i += warp_size)
@@ -384,10 +382,10 @@ struct batch_memcpy_impl
 
     struct copyable_blev_buffers
     {
-        InputBufferItType  srcs;
-        OutputBufferItType dsts;
-        BufferSizeItType   sizes;
-        tile_offset_type*  offsets;
+        input_buffer_type*  srcs;
+        output_buffer_type* dsts;
+        buffer_size_type*   sizes;
+        tile_offset_type*   offsets;
     };
 
 private:
@@ -475,8 +473,9 @@ private:
                 } copy_tlev;
             } shared;
         };
-
+        ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
         using storage_type = rocprim::detail::raw_storage<storage>;
+        ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
         ROCPRIM_DEVICE ROCPRIM_INLINE non_blev_memcpy() {}
 
@@ -611,7 +610,7 @@ private:
         {
             const uint32_t warp_id = rocprim::warp_id();
             const uint32_t warps_per_block
-                = rocprim::flat_block_size() / rocprim::device_warp_size();
+                = rocprim::flat_block_size() / rocprim::arch::wavefront::min_size();
 
             for(buffer_offset_type buffer_offset = warp_id; buffer_offset < num_wlev_buffers;
                 buffer_offset += warps_per_block)
@@ -1200,7 +1199,7 @@ ROCPRIM_INLINE static hipError_t batch_memcpy_func(void*              temporary_
     }
     if(debug_synchronous)
     {
-        hipStreamSynchronize(stream);
+        ROCPRIM_RETURN_ON_ERROR(hipStreamSynchronize(stream));
     }
 
     // Launch batch_memcpy_non_blev_kernel.
@@ -1218,7 +1217,7 @@ ROCPRIM_INLINE static hipError_t batch_memcpy_func(void*              temporary_
     }
     if(debug_synchronous)
     {
-        hipStreamSynchronize(stream);
+        ROCPRIM_RETURN_ON_ERROR(hipStreamSynchronize(stream));
     }
 
     // Launch batch_memcpy_blev_kernel.
@@ -1234,7 +1233,7 @@ ROCPRIM_INLINE static hipError_t batch_memcpy_func(void*              temporary_
     }
     if(debug_synchronous)
     {
-        hipStreamSynchronize(stream);
+        ROCPRIM_RETURN_ON_ERROR(hipStreamSynchronize(stream));
     }
 
     return hipSuccess;

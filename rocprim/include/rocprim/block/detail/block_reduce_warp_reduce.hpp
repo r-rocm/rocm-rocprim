@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2021 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -47,7 +47,7 @@ class block_reduce_warp_reduce
     static constexpr unsigned int BlockSize = BlockSizeX * BlockSizeY * BlockSizeZ;
     // Select warp size
     static constexpr unsigned int warp_size_ =
-        detail::get_min_warp_size(BlockSize, ::rocprim::device_warp_size());
+        detail::get_min_warp_size(BlockSize, ::rocprim::arch::wavefront::min_size());
     // Number of warps in block
     static constexpr unsigned int warps_no_ = (BlockSize + warp_size_ - 1) / warp_size_;
 
@@ -72,7 +72,9 @@ class block_reduce_warp_reduce
     };
 
 public:
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
     using storage_type = detail::raw_storage<storage_type_>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     template<class BinaryFunction>
     ROCPRIM_DEVICE ROCPRIM_INLINE
@@ -188,14 +190,15 @@ private:
             }
             ::rocprim::syncthreads();
 
-            if(flat_tid < warps_no_)
+            if(warp_id == 0)
             {
                 // Use warp partial to calculate the final reduce results for every thread
-                auto warp_partial = storage_.warp_partials[lane_id];
+                auto warp_partial = storage_.warp_partials[lane_id % warps_no_];
 
-                warp_reduce<!warps_no_is_pow_of_two_, warp_reduce_output_type>(
-                    warp_partial, output, warps_no_, reduce_op
-                );
+                warp_reduce<!warps_no_is_pow_of_two_, warp_reduce_output_type>(warp_partial,
+                                                                               output,
+                                                                               warps_no_,
+                                                                               reduce_op);
             }
         }
     }

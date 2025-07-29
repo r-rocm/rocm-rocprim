@@ -86,11 +86,12 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
     static constexpr unsigned int batch_size  = 10;
     static constexpr unsigned int warmup_size = 5;
 
-    void run_benchmark(benchmark::State& state,
-                       size_t            num_segments,
-                       size_t            mean_segment_length,
-                       size_t            target_size,
-                       hipStream_t       stream) const
+    void run_benchmark(benchmark::State&   state,
+                       size_t              num_segments,
+                       size_t              mean_segment_length,
+                       size_t              target_size,
+                       const managed_seed& seed,
+                       hipStream_t         stream) const
     {
         using offset_type = int;
         using key_type    = Key;
@@ -98,8 +99,8 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
         std::vector<offset_type> offsets;
         offsets.push_back(0);
 
-        static constexpr int       seed = 716;
-        std::default_random_engine gen(seed);
+        static constexpr int iseed = 716;
+        engine_type          gen(iseed);
 
         std::normal_distribution<double> segment_length_dis(
             static_cast<double>(mean_segment_length),
@@ -121,19 +122,12 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
         const size_t size           = offset;
         const size_t segments_count = offsets.size() - 1;
 
-        std::vector<key_type> keys_input;
-        if(std::is_floating_point<key_type>::value)
-        {
-            keys_input = get_random_data<key_type>(size,
-                                                   static_cast<key_type>(-1000),
-                                                   static_cast<key_type>(1000));
-        }
-        else
-        {
-            keys_input = get_random_data<key_type>(size,
-                                                   std::numeric_limits<key_type>::min(),
-                                                   std::numeric_limits<key_type>::max());
-        }
+        std::vector<key_type> keys_input
+            = get_random_data<key_type>(size,
+                                        generate_limits<key_type>::min(),
+                                        generate_limits<key_type>::max(),
+                                        seed.get_0());
+
         size_t batch_size = 1;
         if(size < target_size)
         {
@@ -240,8 +234,14 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
         HIP_CHECK(hipFree(d_keys_output));
     }
 
-    void run(benchmark::State& state, size_t size, hipStream_t stream) const override
+    void run(benchmark::State&   state,
+             size_t              bytes,
+             const managed_seed& seed,
+             hipStream_t         stream) const override
     {
+        // Calculate the number of elements 
+        size_t size = bytes / sizeof(Key);
+
         constexpr std::array<size_t, 8>
             segment_counts{10, 100, 1000, 2500, 5000, 7500, 10000, 100000};
         constexpr std::array<size_t, 4> segment_lengths{30, 256, 3000, 300000};
@@ -256,7 +256,7 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
                     continue;
                 }
 
-                run_benchmark(state, segment_count, segment_length, size, stream);
+                run_benchmark(state, segment_count, segment_length, size, seed, stream);
             }
         }
     }
@@ -264,92 +264,38 @@ struct device_segmented_radix_sort_benchmark : public config_autotune_interface
 
 template<typename Tp, template<Tp> class T, bool enable, Tp... Idx>
 struct decider;
-template<unsigned int BlockSize, unsigned int ItemsPerThread, typename Key, bool PartitionAllowed>
+
+template<unsigned int LongBits,
+         unsigned int ShortBits,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         unsigned int WarpSmallLWS,
+         unsigned int WarpSmallIPT,
+         unsigned int WarpSmallBS,
+         unsigned int WarpPartition,
+         unsigned int WarpMediumLWS,
+         unsigned int WarpMediumIPT,
+         unsigned int WarpMediumBS,
+         typename Key,
+         bool UnpartitionWarpAllowed = true>
 struct device_segmented_radix_sort_benchmark_generator
 {
-    template<unsigned int LongBits>
-    struct create_lrb
-    {
-        template<unsigned int ShortBits>
-        struct create_srb
-        {
-            template<bool EnableUnpartitionedWarpSort>
-            struct create_euws
-            {
-                template<unsigned int LogicalWarpSizeSmall>
-                struct create_lwss
-                {
-                    template<unsigned int PartitioningThreshold>
-                    struct create_pt
-                    {
-                        void operator()(
-                            std::vector<std::unique_ptr<config_autotune_interface>>& storage)
-                        {
-                            storage.emplace_back(
-                                std::make_unique<device_segmented_radix_sort_benchmark<
-                                    Key,
-                                    rocprim::segmented_radix_sort_config<
-                                        LongBits,
-                                        ShortBits,
-                                        rocprim::kernel_config<BlockSize, ItemsPerThread>,
-                                        rocprim::WarpSortConfig<LogicalWarpSizeSmall / 2,
-                                                                ItemsPerThread / 2,
-                                                                BlockSize,
-                                                                PartitioningThreshold,
-                                                                LogicalWarpSizeSmall,
-                                                                ItemsPerThread,
-                                                                BlockSize>,
-                                        EnableUnpartitionedWarpSort>>>());
-                        }
-                    };
-
-                    void
-                        operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
-                    {
-                        static_for_each<std::integer_sequence<unsigned int, 5>, create_pt>(storage);
-                    }
-                };
-
-                void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
-                {
-                    if(PartitionAllowed)
-                    {
-
-                        static_for_each<std::integer_sequence<unsigned int, 8, 16, 32>,
-                                        create_lwss>(storage);
-                    }
-                    else
-                    {
-                        storage.emplace_back(
-                            std::make_unique<device_segmented_radix_sort_benchmark<
-                                Key,
-                                rocprim::segmented_radix_sort_config<
-                                    LongBits,
-                                    ShortBits,
-                                    rocprim::kernel_config<BlockSize, ItemsPerThread>,
-                                    rocprim::DisabledWarpSortConfig,
-                                    EnableUnpartitionedWarpSort>>>());
-                    }
-                }
-            };
-
-            void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
-            {
-                decider<bool, create_euws, 1u << ShortBits <= BlockSize, true>::do_the_thing(
-                    storage);
-            }
-        };
-
-        void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
-        {
-            decider<unsigned int, create_srb, 1u << LongBits <= BlockSize, 3, 5>::do_the_thing(
-                storage);
-        }
-    };
-
     static void create(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
     {
-        static_for_each<std::integer_sequence<unsigned int, 4, 5>, create_lrb>(storage);
+        storage.emplace_back(std::make_unique<device_segmented_radix_sort_benchmark<
+                                 Key,
+                                 rocprim::segmented_radix_sort_config<
+                                     LongBits,
+                                     ShortBits,
+                                     rocprim::kernel_config<BlockSize, ItemsPerThread>,
+                                     rocprim::WarpSortConfig<WarpSmallLWS,
+                                                             WarpSmallIPT,
+                                                             WarpSmallBS,
+                                                             WarpPartition,
+                                                             WarpMediumLWS,
+                                                             WarpMediumIPT,
+                                                             WarpMediumBS>,
+                                     UnpartitionWarpAllowed>>>());
     }
 };
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,10 +24,13 @@
 #include <type_traits>
 
 #include "../../config.hpp"
+#include "../../detail/merge_path.hpp"
 #include "../../detail/various.hpp"
 
 #include "../../functional.hpp"
 #include "../../intrinsics.hpp"
+
+#include "../../detail/merge_path.hpp"
 
 BEGIN_ROCPRIM_NAMESPACE
 
@@ -119,7 +122,7 @@ private:
         const auto lane = lane_id();
         const auto warp = warp_id();
 
-        const auto warp_offset     = warp * ItemsPerThread * device_warp_size();
+        const auto warp_offset     = warp * ItemsPerThread * arch::wavefront::min_size();
         const auto warp_input_size = warp_offset > input_size ? 0 : input_size - warp_offset;
         const auto shared_keys     = &storage.keys[warp_offset];
 
@@ -154,14 +157,14 @@ private:
             const auto keys1_merge_begin = keys1_begin + partition;
             const auto keys2_merge_begin = keys2_begin + diag - partition;
 
-            const range_t range = {
+            const range_t<> range{
                 keys1_merge_begin,
                 keys1_end,
                 keys2_merge_begin,
                 keys2_end,
             };
 
-            serial_merge(shared_keys, thread_keys, range, compare_function);
+            serial_merge<false>(shared_keys, thread_keys, range, compare_function);
 
             wave_barrier();
         }
@@ -178,7 +181,7 @@ private:
         const auto lane = lane_id();
         const auto warp = warp_id();
 
-        const auto warp_offset     = warp * ItemsPerThread * device_warp_size();
+        const auto warp_offset     = warp * ItemsPerThread * arch::wavefront::min_size();
         const auto warp_input_size = warp_offset > input_size ? 0 : input_size - warp_offset;
         const auto shared_keys     = &storage.keys[warp_offset];
         const auto shared_values   = &storage.values[warp_offset];
@@ -215,19 +218,19 @@ private:
             const auto keys1_merge_begin = keys1_begin + partition;
             const auto keys2_merge_begin = keys2_begin + diag - partition;
 
-            const range_t range = {
+            const range_t<> range{
                 keys1_merge_begin,
                 keys1_end,
                 keys2_merge_begin,
                 keys2_end,
             };
 
-            serial_merge(shared_keys,
-                         thread_keys,
-                         shared_values,
-                         thread_values,
-                         range,
-                         compare_function);
+            serial_merge<false>(shared_keys,
+                                thread_keys,
+                                shared_values,
+                                thread_values,
+                                range,
+                                compare_function);
 
             wave_barrier();
         }
@@ -236,7 +239,9 @@ private:
 public:
     static_assert(detail::is_power_of_two(WarpSize), "WarpSize must be power of 2");
 
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
     using storage_type = raw_storage<storage_type_>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     template<class BinaryFunction>
     ROCPRIM_DEVICE ROCPRIM_INLINE void sort(Key& thread_key, BinaryFunction compare_function)
@@ -472,7 +477,7 @@ public:
     {
         (void)storage;
 
-        const auto warp_offset     = warp_id() * device_warp_size();
+        const auto warp_offset     = warp_id() * arch::wavefront::min_size();
         const auto warp_input_size = warp_offset > input_size ? 0 : input_size - warp_offset;
 
         ROCPRIM_UNROLL
@@ -557,7 +562,7 @@ public:
     {
         (void)storage;
 
-        const auto warp_offset     = warp_id() * device_warp_size();
+        const auto warp_offset     = warp_id() * arch::wavefront::min_size();
         const auto warp_input_size = warp_offset > input_size ? 0 : input_size - warp_offset;
 
         ROCPRIM_UNROLL

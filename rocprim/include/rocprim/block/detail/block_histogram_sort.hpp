@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2021 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -69,7 +69,9 @@ public:
         };
     };
 
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_WITH_PUSH
     using storage_type = detail::raw_storage<storage_type_>;
+    ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     template<class Counter>
     ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE
@@ -101,14 +103,10 @@ public:
         ::rocprim::syncthreads(); // Fix race condition that appeared on Vega10 hardware, storage LDS is reused below.
 
         ROCPRIM_UNROLL
-        for(unsigned int offset = 0; offset < Bins; offset += BlockSize)
+        for(unsigned int offset = 0; offset + flat_tid < Bins; offset += BlockSize)
         {
-            const unsigned int offset_tid = offset + flat_tid;
-            if(offset_tid < Bins)
-            {
-                storage_.start[offset_tid] = tile_size;
-                storage_.end[offset_tid] = tile_size;
-            }
+            storage_.start[offset + flat_tid] = tile_size;
+            storage_.end[offset + flat_tid] = tile_size;
         }
         ::rocprim::syncthreads();
 

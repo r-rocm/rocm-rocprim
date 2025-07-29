@@ -29,6 +29,7 @@
 #include "device_transform.hpp"
 
 #include "../config.hpp"
+#include "../common.hpp"
 #include "../functional.hpp"
 
 #include "../detail/temp_storage.hpp"
@@ -52,23 +53,6 @@
 BEGIN_ROCPRIM_NAMESPACE
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS // Do not document
-
-#define ROCPRIM_DETAIL_HIP_SYNC_AND_RETURN_ON_ERROR(name, size, start)                           \
-    {                                                                                            \
-        auto _error = hipGetLastError();                                                         \
-        if(_error != hipSuccess)                                                                 \
-            return _error;                                                                       \
-        if(debug_synchronous)                                                                    \
-        {                                                                                        \
-            std::cout << name << "(" << size << ")";                                             \
-            auto __error = hipStreamSynchronize(stream);                                         \
-            if(__error != hipSuccess)                                                            \
-                return __error;                                                                  \
-            auto _end = std::chrono::high_resolution_clock::now();                               \
-            auto _d   = std::chrono::duration_cast<std::chrono::duration<double>>(_end - start); \
-            std::cout << " " << _d.count() * 1000 << " ms" << '\n';                              \
-        }                                                                                        \
-    }
 
 namespace detail
 {
@@ -201,14 +185,14 @@ hipError_t adjacent_difference_impl(void* const          temporary_storage,
         const auto current_blocks = ceiling_div(current_size, items_per_block);
         const auto starting_block = i * number_of_blocks_limit;
 
-        std::chrono::time_point<std::chrono::high_resolution_clock> start;
+        std::chrono::time_point<std::chrono::steady_clock> start;
         if(debug_synchronous)
         {
             std::cout << "index:            " << i << '\n';
             std::cout << "current_size:     " << current_size << '\n';
             std::cout << "number of blocks: " << current_blocks << '\n';
 
-            start = std::chrono::high_resolution_clock::now();
+            start = std::chrono::steady_clock::now();
         }
         hipLaunchKernelGGL(HIP_KERNEL_NAME(adjacent_difference_kernel<config, InPlace, Right>),
                            dim3(current_blocks),
@@ -228,7 +212,7 @@ hipError_t adjacent_difference_impl(void* const          temporary_storage,
 }
 } // namespace detail
 
-    #undef ROCPRIM_DETAIL_HIP_SYNC_AND_RETURN_ON_ERROR
+
 
 #endif // DOXYGEN_SHOULD_SKIP_THIS
 
@@ -249,8 +233,7 @@ hipError_t adjacent_difference_impl(void* const          temporary_storage,
 /// }
 /// \endcode
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam OutputIt [inferred] random-access iterator type of the output range. Must meet the
@@ -345,8 +328,7 @@ hipError_t adjacent_difference(void* const          temporary_storage,
 /// }
 /// \endcode
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the value range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam BinaryFunction [inferred] binary operation function object that will be applied to
@@ -387,8 +369,7 @@ hipError_t adjacent_difference_inplace(void* const          temporary_storage,
 /// \brief Parallel primitive for applying a binary operation across pairs of consecutive elements
 /// in device accessible memory. Writes the output to the position of the left item.
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the value range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam OutputIt [inferred] random-access iterator type of the output range. Must meet the
@@ -457,8 +438,7 @@ hipError_t adjacent_difference_inplace(void* const          temporary_storage,
 /// }
 /// \endcode
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the input range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam OutputIt [inferred] random-access iterator type of the output range. Must meet the
@@ -553,8 +533,7 @@ hipError_t adjacent_difference_right(void* const          temporary_storage,
 /// }
 /// \endcode
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the value range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam BinaryFunction [inferred] binary operation function object that will be applied to
@@ -595,8 +574,7 @@ hipError_t adjacent_difference_right_inplace(void* const          temporary_stor
 /// \brief Parallel primitive for applying a binary operation across pairs of consecutive elements
 /// in device accessible memory. Writes the output to the position of the right item.
 ///
-/// \tparam Config [optional] configuration of the primitive. It has to be
-/// `adjacent_difference_config` or a class derived from it.
+/// \tparam Config [optional] configuration of the primitive, must be `default_config` or `adjacent_difference_config`.
 /// \tparam InputIt [inferred] random-access iterator type of the value range. Must meet the
 /// requirements of a C++ InputIterator concept. It can be a simple pointer type.
 /// \tparam OutputIt [inferred] random-access iterator type of the output range. Must meet the

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,9 +24,10 @@
 #include "../config.hpp"
 #include "../detail/various.hpp"
 
-#include "../intrinsics.hpp"
 #include "../functional.hpp"
+#include "../intrinsics.hpp"
 #include "../types.hpp"
+#include "rocprim/intrinsics/arch.hpp"
 
 /// \addtogroup blockmodule
 /// @{
@@ -146,7 +147,6 @@ void block_load_direct_blocked(unsigned int flat_id,
     {
         items[item] = static_cast<T>(out_of_bounds);
     }
-    // TODO: Consider using std::fill for HIP-CPU, as uses memset() where appropriate
 
     block_load_direct_blocked(flat_id, block_input, items, valid);
 }
@@ -369,7 +369,7 @@ void block_load_direct_striped(unsigned int flat_id,
 /// \param block_input - the input iterator from the thread block to load from
 /// \param items - array that data is loaded to
 template<
-    unsigned int WarpSize = device_warp_size(),
+    unsigned int WarpSize = arch::wavefront::min_size(),
     class InputIterator,
     class T,
     unsigned int ItemsPerThread
@@ -379,9 +379,11 @@ void block_load_direct_warp_striped(unsigned int flat_id,
                                     InputIterator block_input,
                                     T (&items)[ItemsPerThread])
 {
-    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= device_warp_size(),
+    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= arch::wavefront::max_size(),
                  "WarpSize must be a power of two and equal or less"
                  "than the size of hardware warp.");
+    assert(WarpSize <= arch::wavefront::size());
+                 
     unsigned int thread_id = detail::logical_lane_id<WarpSize>();
     unsigned int warp_id = flat_id / WarpSize;
     unsigned int warp_offset = warp_id * WarpSize * ItemsPerThread;
@@ -421,7 +423,7 @@ void block_load_direct_warp_striped(unsigned int flat_id,
 /// \param items - array that data is loaded to
 /// \param valid - maximum range of valid numbers to load
 template<
-    unsigned int WarpSize = device_warp_size(),
+    unsigned int WarpSize = arch::wavefront::min_size(),
     class InputIterator,
     class T,
     unsigned int ItemsPerThread
@@ -432,7 +434,7 @@ void block_load_direct_warp_striped(unsigned int flat_id,
                                     T (&items)[ItemsPerThread],
                                     unsigned int valid)
 {
-    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= device_warp_size(),
+    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= arch::wavefront::max_size(),
                  "WarpSize must be a power of two and equal or less"
                  "than the size of hardware warp.");
     unsigned int thread_id = detail::logical_lane_id<WarpSize>();
@@ -481,7 +483,7 @@ void block_load_direct_warp_striped(unsigned int flat_id,
 /// \param valid - maximum range of valid numbers to load
 /// \param out_of_bounds - default value assigned to out-of-bound items
 template<
-    unsigned int WarpSize = device_warp_size(),
+    unsigned int WarpSize = arch::wavefront::min_size(),
     class InputIterator,
     class T,
     unsigned int ItemsPerThread,
@@ -494,9 +496,11 @@ void block_load_direct_warp_striped(unsigned int flat_id,
                                     unsigned int valid,
                                     Default out_of_bounds)
 {
-    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= device_warp_size(),
+    static_assert(detail::is_power_of_two(WarpSize) && WarpSize <= arch::wavefront::max_size(),
                  "WarpSize must be a power of two and equal or less"
                  "than the size of hardware warp.");
+    assert(WarpSize <= arch::wavefront::size());
+                 
     ROCPRIM_UNROLL
     for (unsigned int item = 0; item < ItemsPerThread; item++)
     {

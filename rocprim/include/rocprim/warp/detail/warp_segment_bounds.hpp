@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2021 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,9 +33,8 @@ namespace detail
 
 // Returns logical warp id of the last thread in thread's segment
 template<bool HeadSegmented, unsigned int WarpSize, class Flag>
-ROCPRIM_DEVICE ROCPRIM_INLINE
-auto last_in_warp_segment(Flag flag)
-    -> typename std::enable_if<(WarpSize <= __AMDGCN_WAVEFRONT_SIZE), unsigned int>::type
+ROCPRIM_DEVICE ROCPRIM_INLINE auto last_in_warp_segment(Flag flag) ->
+    typename std::enable_if<(WarpSize <= arch::wavefront::min_size()), unsigned int>::type
 {
     // Get flags (now every thread know where the flags are)
     lane_mask_type warp_flags = ::rocprim::ballot(flag);
@@ -53,23 +52,10 @@ auto last_in_warp_segment(Flag flag)
     // Make sure last item in logical warp is marked as a tail
     warp_flags |= lane_mask_type(1) << (WarpSize - 1U);
     // Calculate logical lane id of the last valid value in the segment
-#ifndef __HIP_CPU_RT__
-    #if __AMDGCN_WAVEFRONT_SIZE == 32
+#if ROCPRIM_WAVEFRONT_SIZE == 32
     return ::__ffs(warp_flags) - 1;
-    #else
+#else
     return ::__ffsll(warp_flags) - 1;
-    #endif
-#else
-#if _MSC_VER
-    // TODO: verify correctness
-    unsigned long tmp = 0;
-    _BitScanReverse64(&tmp, warp_flags);
-    return 1u << tmp;
-#elif __GNUC__
-    return __builtin_ctzl(warp_flags);
-#else
-    static_assert(false, "Look for GCC/Clang implementation");
-#endif
 #endif
 }
 

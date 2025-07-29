@@ -37,24 +37,25 @@
 #include <cstddef>
 
 #ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 32;
+const size_t DEFAULT_BYTES = 1024 * 1024 * 32 * 4;
 #endif
 
 #define CREATE_BENCHMARK(...)                                                \
     {                                                                        \
         const device_merge_sort_block_merge_benchmark<__VA_ARGS__> instance; \
-        REGISTER_BENCHMARK(benchmarks, size, stream, instance);              \
+        REGISTER_BENCHMARK(benchmarks, bytes, seed, stream, instance);        \
     }
 
 int main(int argc, char* argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
 #ifdef BENCHMARK_CONFIG_TUNING
     // optionally run an evenly split subset of benchmarks, when making multiple program invocations
     parser.set_optional<int>("parallel_instance",
@@ -70,16 +71,19 @@ int main(int argc, char* argv[])
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size   = parser.get<size_t>("size");
+    const size_t bytes   = parser.get<size_t>("size");
     const int    trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     // Add benchmarks
     std::vector<benchmark::internal::Benchmark*> benchmarks = {};
@@ -89,7 +93,8 @@ int main(int argc, char* argv[])
     config_autotune_register::register_benchmark_subset(benchmarks,
                                                         parallel_instance,
                                                         parallel_instances,
-                                                        size,
+                                                        bytes,
+                                                        seed,
                                                         stream);
 #else // BENCHMARK_CONFIG_TUNING
     CREATE_BENCHMARK(int)

@@ -57,34 +57,24 @@ struct device_radix_sort_benchmark : public config_autotune_interface
     static constexpr unsigned int batch_size  = 10;
     static constexpr unsigned int warmup_size = 5;
 
-    static std::vector<Key> generate_keys(size_t size)
-    {
-        using key_type = Key;
-
-        if(std::is_floating_point<key_type>::value)
-        {
-            return get_random_data<key_type>(size,
-                                             static_cast<key_type>(-1000),
-                                             static_cast<key_type>(1000),
-                                             size);
-        }
-        else
-        {
-            return get_random_data<key_type>(size,
-                                             std::numeric_limits<key_type>::min(),
-                                             std::numeric_limits<key_type>::max(),
-                                             size);
-        }
-    }
-
     // keys benchmark
     template<typename val = Value>
-    auto do_run(benchmark::State& state, size_t size, const hipStream_t stream) const
+    auto do_run(benchmark::State&   state,
+                size_t              bytes,
+                const managed_seed& seed,
+                hipStream_t         stream) const
         -> std::enable_if_t<std::is_same<val, ::rocprim::empty_type>::value, void>
     {
-        auto keys_input = generate_keys(size);
-
         using key_type = Key;
+
+        // Calculate the number of elements 
+        size_t size = bytes / sizeof(key_type);
+
+        std::vector<key_type> keys_input
+            = get_random_data<key_type>(size,
+                                        generate_limits<key_type>::min(),
+                                        generate_limits<key_type>::max(),
+                                        seed.get_0());
 
         key_type* d_keys_input;
         key_type* d_keys_output;
@@ -169,13 +159,23 @@ struct device_radix_sort_benchmark : public config_autotune_interface
 
     // pairs benchmark
     template<typename val = Value>
-    auto do_run(benchmark::State& state, size_t size, const hipStream_t stream) const
+    auto do_run(benchmark::State&   state,
+                size_t              bytes,
+                const managed_seed& seed,
+                hipStream_t         stream) const
         -> std::enable_if_t<!std::is_same<val, ::rocprim::empty_type>::value, void>
     {
-        auto keys_input = generate_keys(size);
-
         using key_type   = Key;
         using value_type = Value;
+
+        // Calculate the number of elements 
+        size_t size = bytes / sizeof(key_type);
+
+        std::vector<key_type> keys_input
+            = get_random_data<key_type>(size,
+                                        generate_limits<key_type>::min(),
+                                        generate_limits<key_type>::max(),
+                                        seed.get_0());
 
         std::vector<value_type> values_input(size);
         for(size_t i = 0; i < size; i++)
@@ -275,9 +275,12 @@ struct device_radix_sort_benchmark : public config_autotune_interface
         HIP_CHECK(hipFree(d_values_output));
     }
 
-    void run(benchmark::State& state, size_t size, hipStream_t stream) const override
+    void run(benchmark::State&   state,
+             size_t              size,
+             const managed_seed& seed,
+             hipStream_t         stream) const override
     {
-        do_run(state, size, stream);
+        do_run(state, size, seed, stream);
     }
 
 private:
@@ -376,15 +379,16 @@ private:
     }
 };
 
-#define CREATE_RADIX_SORT_BENCHMARK(...)                         \
-    {                                                            \
-        const device_radix_sort_benchmark<__VA_ARGS__> instance; \
-        REGISTER_BENCHMARK(benchmarks, size, stream, instance);  \
+#define CREATE_RADIX_SORT_BENCHMARK(...)                              \
+    {                                                                 \
+        const device_radix_sort_benchmark<__VA_ARGS__> instance;      \
+        REGISTER_BENCHMARK(benchmarks, bytes, seed, stream, instance); \
     }
 
 inline void add_sort_keys_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                                     hipStream_t                                   stream,
-                                     size_t                                        size)
+                                     size_t                                        bytes,
+                                     const managed_seed&                           seed,
+                                     hipStream_t                                   stream)
 {
     using custom_key = custom_type<float, int16_t>;
     CREATE_RADIX_SORT_BENCHMARK(int)
@@ -398,8 +402,9 @@ inline void add_sort_keys_benchmarks(std::vector<benchmark::internal::Benchmark*
 }
 
 inline void add_sort_pairs_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                                      hipStream_t                                   stream,
-                                      size_t                                        size)
+                                      size_t                                        bytes,
+                                      const managed_seed&                           seed,
+                                      hipStream_t                                   stream)
 {
     using custom_float2  = custom_type<float, float>;
     using custom_double2 = custom_type<double, double>;

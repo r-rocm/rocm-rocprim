@@ -29,6 +29,25 @@ set(CMAKE_INSTALL_PREFIX "/opt/rocm" CACHE PATH "Install path prefix, prepended 
 # rocPRIM project
 project(rocprim LANGUAGES CXX)
 
+# Set CXX flags
+if (NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Set HIP flags
+set(CMAKE_HIP_STANDARD 14)
+set(CMAKE_HIP_STANDARD_REQUIRED ON)
+set(CMAKE_HIP_EXTENSIONS OFF)
+
+# Set CXX standard
+if (CMAKE_CXX_STANDARD EQUAL 14)
+  message(WARNING "C++14 will be deprecated in the next major release")
+elseif(NOT CMAKE_CXX_STANDARD EQUAL 17)
+  message(FATAL_ERROR "Only C++14 and C++17 are supported")
+endif()
+
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
   set(ROCPRIM_PROJECT_IS_TOP_LEVEL TRUE)
 else()
@@ -42,15 +61,35 @@ else()
   set(ROCM_ROOT "/opt/rocm" CACHE PATH "Root directory of the ROCm installation")
 endif()
 
+include(CheckLanguage)
+include(CMakeDependentOption)
+
 # Build options
-option(BUILD_TEST "Build tests (requires googletest)" OFF)
-option(BUILD_BENCHMARK "Build benchmarks" OFF)
-option(BUILD_EXAMPLE "Build examples" OFF)
-option(USE_HIP_CPU "Prefer HIP-CPU runtime instead of HW acceleration" OFF)
 # Disables building tests, benchmarks, examples
 option(ONLY_INSTALL "Only install" OFF)
+cmake_dependent_option(BUILD_TEST "Build tests (requires googletest)" OFF "NOT ONLY_INSTALL" OFF)
+cmake_dependent_option(BUILD_BENCHMARK "Build benchmarks" OFF "NOT ONLY_INSTALL" OFF)
+cmake_dependent_option(BUILD_EXAMPLE "Build examples" OFF "NOT ONLY_INSTALL" OFF)
+option(BUILD_NAIVE_BENCHMARK "Build naive benchmarks" OFF)
+cmake_dependent_option(BUILD_DOCS "Build documentation (requires sphinx)" OFF "NOT ONLY_INSTALL" OFF)
 option(BUILD_CODE_COVERAGE "Build with code coverage enabled" OFF)
 option(ROCPRIM_INSTALL "Enable installation of rocPRIM (projects embedding rocPRIM may want to turn this OFF)" ON)
+
+check_language(HIP)
+cmake_dependent_option(USE_HIPCXX "Use CMake HIP language support" OFF CMAKE_HIP_COMPILER OFF)
+
+if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+  set(ROCPRIM_PROJECT_IS_TOP_LEVEL TRUE)
+else()
+  set(ROCPRIM_PROJECT_IS_TOP_LEVEL FALSE)
+endif()
+
+#Adding CMAKE_PREFIX_PATH
+if(WIN32)
+  set(ROCM_ROOT "$ENV{HIP_PATH}" CACHE PATH "Root directory of the ROCm installation")
+else()
+  set(ROCM_ROOT "/opt/rocm" CACHE PATH "Root directory of the ROCm installation")
+endif()
 
 # CMake modules
 list(APPEND CMAKE_MODULE_PATH
@@ -67,21 +106,19 @@ endif()
 
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE CACHE BOOL "Add paths to linker search and installed rpath")
 
-# Set CXX flags
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
 if(DEFINED BUILD_SHARED_LIBS)
   set(PKG_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
-else()
+else()  
   set(PKG_BUILD_SHARED_LIBS ON)
-endif()
+endif()  
 set(BUILD_SHARED_LIBS OFF) # don't build client dependencies as shared
-if(NOT USE_HIP_CPU)
-  # Get dependencies (required here to get rocm-cmake)
-  include(cmake/Dependencies.cmake)
-  # Use target ID syntax if supported for GPU_TARGETS
+
+# Get dependencies (required here to get rocm-cmake)
+include(cmake/Dependencies.cmake)
+# Use target ID syntax if supported for GPU_TARGETS
+if(USE_HIPCXX)
+  enable_language(HIP)
+else()
   if (NOT DEFINED AMDGPU_TARGETS)
     set(GPU_TARGETS "all" CACHE STRING "GPU architectures to compile for")
   else()
@@ -90,19 +127,27 @@ if(NOT USE_HIP_CPU)
   set_property(CACHE GPU_TARGETS PROPERTY STRINGS "all")
 
   if(GPU_TARGETS STREQUAL "all")
-    rocm_check_target_ids(DEFAULT_AMDGPU_TARGETS
-      TARGETS "gfx803;gfx900:xnack-;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack-;gfx90a:xnack+;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151"
-    )
+    if(BUILD_ADDRESS_SANITIZER)
+      # ASAN builds require xnack
+      rocm_check_target_ids(DEFAULT_AMDGPU_TARGETS
+        TARGETS "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+"
+      )
+    else()
+      rocm_check_target_ids(DEFAULT_AMDGPU_TARGETS
+        TARGETS "gfx803;gfx900:xnack-;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack-;gfx90a:xnack+;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+      )
+    endif()
+
     set(GPU_TARGETS "${DEFAULT_AMDGPU_TARGETS}" CACHE STRING "GPU architectures to compile for" FORCE)
   endif()
-
-  # TODO: Fix VerifyCompiler for HIP on Windows
-  if (NOT WIN32)
-    include(cmake/VerifyCompiler.cmake)
-  endif()
-  list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH} ${ROCM_PATH}/hip ${ROCM_PATH}/llvm ${ROCM_ROOT}/llvm ${ROCM_ROOT} ${ROCM_ROOT}/hip)
-  find_package(hip REQUIRED CONFIG PATHS ${HIP_DIR} ${ROCM_PATH} /opt/rocm)
 endif()
+
+# TODO: Fix VerifyCompiler for HIP on Windows
+if (NOT WIN32)
+  include(cmake/VerifyCompiler.cmake)
+endif()
+list(APPEND CMAKE_PREFIX_PATH ${ROCM_PATH} ${ROCM_PATH}/hip ${ROCM_PATH}/llvm ${ROCM_ROOT}/llvm ${ROCM_ROOT} ${ROCM_ROOT}/hip)
+find_package(hip REQUIRED CONFIG PATHS ${HIP_DIR} ${ROCM_PATH} /opt/rocm)
 
 # FOR HANDLING ENABLE/DISABLE OPTIONAL BACKWARD COMPATIBILITY for FILE/FOLDER REORG
 option(BUILD_FILE_REORG_BACKWARD_COMPATIBILITY "Build with file/folder reorg with backward compatibility enabled" OFF)
@@ -120,13 +165,8 @@ if(BUILD_CODE_COVERAGE)
   add_link_options(--coverage)
 endif()
 
-if(USE_HIP_CPU)
-  # Get dependencies
-  include(cmake/Dependencies.cmake)
-endif()
-
 # Setup VERSION
-set(VERSION_STRING "3.2.2")
+set(VERSION_STRING "3.4.1")
 rocm_setup_version(VERSION ${VERSION_STRING})
 
 # Print configuration summary
@@ -136,12 +176,12 @@ print_configuration_summary()
 # rocPRIM library
 add_subdirectory(rocprim)
 
-if(ROCPRIM_PROJECT_IS_TOP_LEVEL AND NOT ONLY_INSTALL AND (BUILD_TEST OR BUILD_BENCHMARK))
+if(ROCPRIM_PROJECT_IS_TOP_LEVEL AND (BUILD_TEST OR BUILD_BENCHMARK))
   rocm_package_setup_component(clients)
 endif()
 
 # Tests
-if(BUILD_TEST AND NOT ONLY_INSTALL)
+if(BUILD_TEST)
   if (ROCPRIM_PROJECT_IS_TOP_LEVEL)
     rocm_package_setup_client_component(tests)
   endif()
@@ -150,7 +190,7 @@ if(BUILD_TEST AND NOT ONLY_INSTALL)
 endif()
 
 # Benchmarks
-if(BUILD_BENCHMARK AND NOT ONLY_INSTALL)
+if(BUILD_BENCHMARK)
   if (ROCPRIM_PROJECT_IS_TOP_LEVEL)
     rocm_package_setup_client_component(benchmarks)
   endif()
@@ -158,8 +198,13 @@ if(BUILD_BENCHMARK AND NOT ONLY_INSTALL)
 endif()
 
 # Examples
-if(BUILD_EXAMPLE AND NOT ONLY_INSTALL)
+if(BUILD_EXAMPLE)
   add_subdirectory(example)
+endif()
+
+# Docs
+if(BUILD_DOCS)
+  add_subdirectory(docs)
 endif()
 
 # set BUILD_SHARED_LIBS for packaging

@@ -39,8 +39,8 @@
 #include <string>
 #include <vector>
 
-#ifndef DEFAULT_N
-const size_t DEFAULT_N = 1024 * 1024 * 32;
+#ifndef DEFAULT_BYTES
+const size_t DEFAULT_BYTES = 1024 * 1024 * 32 * 4;
 #endif
 
 namespace rp = rocprim;
@@ -59,22 +59,26 @@ constexpr std::array<size_t, 4> segment_lengths{30, 256, 3000, 300000};
 // This happens partially, because of the algorithm has 4 kernels, and decides at runtime which one to call.
 
 template<class Key, class Value>
-void run_sort_pairs_benchmark(benchmark::State& state,
-                              size_t            num_segments,
-                              size_t            mean_segment_length,
-                              size_t            target_size,
-                              hipStream_t       stream)
+void run_sort_pairs_benchmark(benchmark::State&   state,
+                              size_t              num_segments,
+                              size_t              mean_segment_length,
+                              size_t              target_bytes,
+                              const managed_seed& seed,
+                              hipStream_t         stream)
 {
     using offset_type = int;
     using key_type    = Key;
     using value_type  = Value;
 
+    // Calculate the number of elements 
+    size_t target_size = target_bytes / sizeof(key_type);
+
     // Generate data
     std::vector<offset_type> offsets;
     offsets.push_back(0);
 
-    static constexpr int       seed = 716;
-    std::default_random_engine gen(seed);
+    static constexpr int iseed = 716;
+    engine_type          gen(iseed);
 
     std::normal_distribution<double> segment_length_dis(static_cast<double>(mean_segment_length),
                                                         0.1 * mean_segment_length);
@@ -95,19 +99,11 @@ void run_sort_pairs_benchmark(benchmark::State& state,
     const size_t size           = offset;
     const size_t segments_count = offsets.size() - 1;
 
-    std::vector<key_type> keys_input;
-    if(std::is_floating_point<key_type>::value)
-    {
-        keys_input = get_random_data<key_type>(size,
-                                               static_cast<key_type>(-1000),
-                                               static_cast<key_type>(1000));
-    }
-    else
-    {
-        keys_input = get_random_data<key_type>(size,
-                                               std::numeric_limits<key_type>::min(),
-                                               std::numeric_limits<key_type>::max());
-    }
+    std::vector<key_type> keys_input = get_random_data<key_type>(size,
+                                                                 generate_limits<key_type>::min(),
+                                                                 generate_limits<key_type>::max(),
+                                                                 seed.get_0());
+
     size_t batch_size = 1;
     if(size < target_size)
     {
@@ -235,11 +231,15 @@ void run_sort_pairs_benchmark(benchmark::State& state,
 
 template<class KeyT, class ValueT>
 void add_sort_pairs_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                               hipStream_t                                   stream,
-                               size_t                                        max_size,
+                               size_t                                        max_bytes,
                                size_t                                        min_size,
-                               size_t                                        target_size)
+                               size_t                                        target_size,
+                               const managed_seed&                           seed,
+                               hipStream_t                                   stream)
 {
+    // Calculate the number of elements 
+    size_t max_size = max_bytes / sizeof(KeyT);
+
     std::string key_name   = Traits<KeyT>::name();
     std::string value_name = Traits<ValueT>::name();
     for(const auto segment_count : segment_counts)
@@ -263,6 +263,7 @@ void add_sort_pairs_benchmarks(std::vector<benchmark::internal::Benchmark*>& ben
                                                            segment_count,
                                                            segment_length,
                                                            target_size,
+                                                           seed,
                                                            stream);
                 }));
         }
@@ -272,13 +273,13 @@ void add_sort_pairs_benchmarks(std::vector<benchmark::internal::Benchmark*>& ben
 int main(int argc, char* argv[])
 {
     cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_N, "number of values");
+    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
     parser.set_optional<int>("trials", "trials", -1, "number of iterations");
     parser.set_optional<std::string>("name_format",
                                      "name_format",
                                      "human",
                                      "either: json,human,txt");
-
+    parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
 #ifdef BENCHMARK_CONFIG_TUNING
     // optionally run an evenly split subset of benchmarks, when making multiple program invocations
     parser.set_optional<int>("parallel_instance",
@@ -295,16 +296,19 @@ int main(int argc, char* argv[])
 
     // Parse argv
     benchmark::Initialize(&argc, argv);
-    const size_t size   = parser.get<size_t>("size");
+    const size_t bytes   = parser.get<size_t>("size");
     const int    trials = parser.get<int>("trials");
     bench_naming::set_format(parser.get<std::string>("name_format"));
+    const std::string  seed_type = parser.get<std::string>("seed");
+    const managed_seed seed(seed_type);
 
     // HIP
     hipStream_t stream = 0; // default
 
     // Benchmark info
     add_common_benchmark_info();
-    benchmark::AddCustomContext("size", std::to_string(size));
+    benchmark::AddCustomContext("bytes", std::to_string(bytes));
+    benchmark::AddCustomContext("seed", seed_type);
 
     // Add benchmarks
     std::vector<benchmark::internal::Benchmark*> benchmarks;
@@ -315,26 +319,39 @@ int main(int argc, char* argv[])
     config_autotune_register::register_benchmark_subset(benchmarks,
                                                         parallel_instance,
                                                         parallel_instances,
-                                                        size,
+                                                        bytes,
+                                                        seed,
                                                         stream);
 #else
     using custom_float2  = custom_type<float, float>;
     using custom_double2 = custom_type<double, double>;
-    add_sort_pairs_benchmarks<int, float>(benchmarks, stream, size, min_size, size / 2);
-    add_sort_pairs_benchmarks<long long, double>(benchmarks, stream, size, min_size, size / 2);
-    add_sort_pairs_benchmarks<int8_t, int8_t>(benchmarks, stream, size, min_size, size / 2);
-    add_sort_pairs_benchmarks<uint8_t, uint8_t>(benchmarks, stream, size, min_size, size / 2);
+    add_sort_pairs_benchmarks<int, float>(benchmarks, bytes, min_size, bytes / 2, seed, stream);
+    add_sort_pairs_benchmarks<long long, double>(benchmarks,
+                                                 bytes,
+                                                 min_size,
+                                                 bytes / 2,
+                                                 seed,
+                                                 stream);
+    add_sort_pairs_benchmarks<int8_t, int8_t>(benchmarks, bytes, min_size, bytes / 2, seed, stream);
+    add_sort_pairs_benchmarks<uint8_t, uint8_t>(benchmarks, bytes, min_size, bytes / 2, seed, stream);
     add_sort_pairs_benchmarks<rocprim::half, rocprim::half>(benchmarks,
-                                                            stream,
-                                                            size,
+                                                            bytes,
                                                             min_size,
-                                                            size / 2);
-    add_sort_pairs_benchmarks<int, custom_float2>(benchmarks, stream, size, min_size, size / 2);
+                                                            bytes / 2,
+                                                            seed,
+                                                            stream);
+    add_sort_pairs_benchmarks<int, custom_float2>(benchmarks,
+                                                  bytes,
+                                                  min_size,
+                                                  bytes / 2,
+                                                  seed,
+                                                  stream);
     add_sort_pairs_benchmarks<long long, custom_double2>(benchmarks,
-                                                         stream,
-                                                         size,
+                                                         bytes,
                                                          min_size,
-                                                         size / 2);
+                                                         bytes / 2,
+                                                         seed,
+                                                         stream);
 #endif
 
     // Use manual timing
