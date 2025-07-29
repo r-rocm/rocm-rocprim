@@ -42,7 +42,8 @@ override_dh_auto_configure:
 		$(ROCM_MATH_CMAKE_PARAMS) \
 		-DBUILD_BENCHMARK=OFF \
 		-DBUILD_SHARED_LIBS=ON \
-		-DCMAKE_MODULE_PATH="$(ROCM_PATH)/lib/cmake/hip;$(ROCM_PATH)/hip/cmake"
+		-DBUILD_TEST=ON \
+		-DCMAKE_MODULE_PATH="$(ROCM_PATH)/lib/cmake/hip"
 
 
 override_dh_auto_build:
