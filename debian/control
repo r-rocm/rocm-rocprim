@@ -6,6 +6,7 @@ Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
  cmake,
+ libgtest-dev,
  pkg-config,
  rocm-cmake,
  rocm-core,
