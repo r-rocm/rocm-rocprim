@@ -55,7 +55,8 @@ override_dh_auto_install:
 	DESTDIR=$(DEB_INST_DIR)/ cmake --build $(DEB_BUILD_PATH) -- $(MAKEOPTS) install
 
 override_dh_install:
-	echo "dh_install skipped"
+	sed -i "s,@ROCM_VERSION@,${ROCM_VERSION},g" debian/*.install
+	dh_install
 
 override_dh_dwz:
 	:

@@ -2,6 +2,7 @@ rocm-rocprim (6.4.2-2) trixie; urgency=medium
 
   * Add Tests and Benchmarks.
   * Add all GPU targets.
+  * Split packages.
 
  --  <chenxuan@iscas.ac.cn>  Tue, 29 Jul 2025 11:24:07 +0800
 
