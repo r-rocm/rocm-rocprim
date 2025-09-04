@@ -6,12 +6,13 @@ Rules-Requires-Root: no
 Build-Depends:
  debhelper-compat (= 13),
  cmake,
- libgtest-dev,
+ libgtest-dev (= 1.16.0-1rocm1),
  pkg-config,
  rocm-cmake,
  rocm-core,
  rocm-env,
  rocm-hip-on-rocclr-dev,
+ rocm-rocr-dev,
 Standards-Version: 4.7.0
 Homepage: https://github.com/ROCm/rocPRIM
 Vcs-Browser: https://github.com/revyos-rocm/rocm-rocprim
@@ -25,7 +26,6 @@ Depends:
  rocm-cmake,
  rocm-core,
  rocm-env,
- rocm-hip-on-rocclr-dev,
 Description: ROCm Parallel Primitives - Header and cmake files
  rocPRIM is a header-only library that provides HIP parallel primitives. You
  can use this library to develop performant GPU-accelerated code on AMD ROCm
@@ -36,10 +36,8 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- rocm-cmake,
  rocm-core,
  rocm-env,
- rocm-hip-on-rocclr,
 Description: ROCm Parallel Primitives - Test files
  rocPRIM is a header-only library that provides HIP parallel primitives. You
  can use this library to develop performant GPU-accelerated code on AMD ROCm
@@ -50,10 +48,8 @@ Architecture: any
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
- rocm-cmake,
  rocm-core,
  rocm-env,
- rocm-hip-on-rocclr,
 Description: ROCm Parallel Primitives - Benchmark files
  rocPRIM is a header-only library that provides HIP parallel primitives. You
  can use this library to develop performant GPU-accelerated code on AMD ROCm
