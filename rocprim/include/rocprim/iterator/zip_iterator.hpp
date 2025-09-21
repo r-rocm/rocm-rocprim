@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -282,11 +282,6 @@ public:
     {
         return !(*this < other);
     }
-
-    [[deprecated]] friend std::ostream& operator<<(std::ostream& os, const zip_iterator& /* iter */)
-    {
-        return os;
-    }
     #endif // DOXYGEN_SHOULD_SKIP_THIS
 
 private:
@@ -307,9 +302,9 @@ operator+(typename zip_iterator<IteratorTuple>::difference_type distance,
 /// make_zip_iterator creates a zip_iterator using \p iterator_tuple as
 /// the underlying tuple of iterator.
 ///
-/// \tparam IteratorTuple - iterator tuple type
+/// \tparam IteratorTuple iterator tuple type
 ///
-/// \param iterator_tuple - tuple of iterators to use
+/// \param iterator_tuple tuple of iterators to use
 /// \return A new zip_iterator object
 template<class IteratorTuple>
 ROCPRIM_HOST_DEVICE inline

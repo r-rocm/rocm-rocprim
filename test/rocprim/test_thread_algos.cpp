@@ -1,7 +1,7 @@
 /******************************************************************************
  * Copyright (c) 2011, Duane Merrill.  All rights reserved.
  * Copyright (c) 2011-2018, NVIDIA CORPORATION.  All rights reserved.
- * Modifications Copyright (c) 2017-2024, Advanced Micro Devices, Inc.  All rights reserved.
+ * Modifications Copyright (c) 2017-2025, Advanced Micro Devices, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -27,16 +27,28 @@
  *
  ******************************************************************************/
 
-#include "rocprim/thread/thread_load.hpp"
-#include "rocprim/thread/thread_store.hpp"
-#include "rocprim/thread/thread_reduce.hpp"
-#include "rocprim/thread/thread_scan.hpp"
-#include "rocprim/thread/thread_search.hpp"
-
 #include "../common_test_header.hpp"
+
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_device_ptr.hpp"
+
 #include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+
+#include <rocprim/config.hpp>
+#include <rocprim/functional.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+#include <rocprim/thread/thread_load.hpp>
+#include <rocprim/thread/thread_reduce.hpp>
+#include <rocprim/thread/thread_scan.hpp>
+#include <rocprim/thread/thread_search.hpp>
+#include <rocprim/thread/thread_store.hpp>
+#include <rocprim/types.hpp>
 
 #include <algorithm>
+#include <cstddef>
+#include <stdint.h>
 #include <vector>
 
 template<class T>
@@ -52,18 +64,23 @@ public:
     using type = typename Params::type;
 };
 
-typedef ::testing::Types<params<uint8_t>,
-                         params<uint16_t>,
-                         params<uint32_t>,
-                         params<uint64_t>,
-                         params<int>,
-                         params<rocprim::half>,
-                         params<rocprim::bfloat16>,
-                         params<float>,
-                         params<double>,
-                         params<test_utils::custom_test_type<uint64_t>>,
-                         params<test_utils::custom_test_type<double>>>
-    ThreadOperationTestParams;
+using ThreadOperationTestParams
+    = ::testing::Types<params<uint8_t>,
+                       params<uint16_t>,
+                       params<uint32_t>,
+                       params<uint64_t>,
+                       params<int>,
+                       params<rocprim::half>,
+                       params<rocprim::bfloat16>,
+                       params<float>,
+                       params<double>,
+                       params<common::custom_type<uint64_t, uint64_t, true>>,
+                       params<common::custom_type<double, double, true>>
+#if ROCPRIM_HAS_INT128_SUPPORT
+                       ,
+                       params<rocprim::uint128_t>
+#endif
+                       >;
 
 TYPED_TEST_SUITE(RocprimThreadOperationTests, ThreadOperationTestParams);
 
@@ -72,9 +89,36 @@ __global__
 void thread_load_kernel(Type* volatile const device_input, Type* device_output)
 {
     size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    ROCPRIM_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations");
-    device_output[index] = rocprim::thread_load<rocprim::load_cg>(device_input + index);
-    ROCPRIM_CLANG_SUPPRESS_WARNING_POP
+
+    if(index % rocprim::load_count == rocprim::load_default)
+    {
+        device_output[index] = rocprim::thread_load(device_input + index);
+    }
+    else if(index % rocprim::load_count == rocprim::load_ca)
+    {
+        device_output[index] = rocprim::thread_load<rocprim::load_ca>(device_input + index);
+    }
+    else if(index % rocprim::load_count == rocprim::load_cg)
+    {
+        device_output[index] = rocprim::thread_load<rocprim::load_cg>(device_input + index);
+    }
+    else if(index % rocprim::load_count == rocprim::load_nontemporal)
+    {
+        device_output[index]
+            = rocprim::thread_load<rocprim::load_nontemporal>(device_input + index);
+    }
+    else if(index % rocprim::load_count == rocprim::load_cv)
+    {
+        device_output[index] = rocprim::thread_load<rocprim::load_cv>(device_input + index);
+    }
+    else if(index % rocprim::load_count == rocprim::load_ldg)
+    {
+        device_output[index] = rocprim::thread_load<rocprim::load_ldg>(device_input + index);
+    }
+    else // index % rocprim::load_count == rocprim::load_volatile
+    {
+        device_output[index] = rocprim::thread_load<rocprim::load_volatile>(device_input + index);
+    }
 }
 
 TYPED_TEST(RocprimThreadOperationTests, Load)
@@ -84,9 +128,63 @@ TYPED_TEST(RocprimThreadOperationTests, Load)
     static constexpr uint32_t grid_size = 128;
     static constexpr uint32_t size = block_size * grid_size;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
+
+        // Generate data
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
+        std::vector<T> output(size);
+
+        // Calculate expected results on host
+        std::vector<T> expected = input;
+
+        // Preparing device
+        common::device_ptr<T> device_input(input);
+        common::device_ptr<T> device_output(input.size());
+
+        thread_load_kernel<T><<<grid_size, block_size>>>(device_input.get(), device_output.get());
+        HIP_CHECK(hipGetLastError());
+
+        // Reading results back
+        output = device_output.load();
+
+        // Verifying results
+        ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
+    }
+}
+
+template<uint32_t ItemsPerThread, class Type>
+__global__
+void thread_copy_unroll_kernel(Type* device_input, Type* device_output)
+{
+    size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t index     = thread_id * ItemsPerThread;
+
+    if(thread_id % 2 == 0)
+    {
+        rocprim::unrolled_copy<ItemsPerThread>(device_input + index, device_output + index);
+    }
+    else
+    {
+        rocprim::unrolled_thread_load<ItemsPerThread, rocprim::load_default>(device_input + index,
+                                                                             device_output + index);
+    }
+}
+
+TYPED_TEST(RocprimThreadOperationTests, CopyUnroll)
+{
+    using T                                  = typename TestFixture::type;
+    static constexpr uint32_t block_size     = 256;
+    static constexpr uint32_t grid_size      = 128;
+    static constexpr uint32_t ItemsPerThread = 4;
+    static constexpr uint32_t size           = block_size * grid_size * ItemsPerThread;
+
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
+    {
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
@@ -97,38 +195,18 @@ TYPED_TEST(RocprimThreadOperationTests, Load)
         std::vector<T> expected = input;
 
         // Preparing device
-        T* device_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input),
-                                                     input.size() * sizeof(T)));
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output),
-                                                     output.size() * sizeof(T)));
+        common::device_ptr<T> device_input(input);
+        common::device_ptr<T> device_output(input.size());
 
-        HIP_CHECK(
-            hipMemcpy(
-                device_input, input.data(),
-                input.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        thread_load_kernel<T><<<grid_size, block_size>>>(device_input, device_output);
+        thread_copy_unroll_kernel<ItemsPerThread, T>
+            <<<grid_size, block_size>>>(device_input.get(), device_output.get());
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), device_output,
-                output.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output = device_output.load();
 
         // Verifying results
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
-
-        HIP_CHECK(hipFree(device_input));
-        HIP_CHECK(hipFree(device_output));
     }
 }
 
@@ -137,63 +215,66 @@ __global__
 void thread_store_kernel(Type* const device_input, Type* device_output)
 {
     size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    ROCPRIM_CLANG_SUPPRESS_WARNING_WITH_PUSH("-Wdeprecated-declarations")
-    rocprim::thread_store<rocprim::store_wb>(device_output + index, device_input[index]);
-    ROCPRIM_CLANG_SUPPRESS_WARNING_POP
+
+    if(index % rocprim::store_count == rocprim::store_default)
+    {
+        rocprim::thread_store(device_output + index, device_input[index]);
+    }
+    else if(index % rocprim::store_count == rocprim::store_wb)
+    {
+        rocprim::thread_store<rocprim::store_wb>(device_output + index, device_input[index]);
+    }
+    else if(index % rocprim::store_count == rocprim::store_cg)
+    {
+        rocprim::thread_store<rocprim::store_cg>(device_output + index, device_input[index]);
+    }
+    else if(index % rocprim::store_count == rocprim::store_nontemporal)
+    {
+        rocprim::thread_store<rocprim::store_nontemporal>(device_output + index,
+                                                          device_input[index]);
+    }
+    else if(index % rocprim::store_count == rocprim::store_wt)
+    {
+        rocprim::thread_store<rocprim::store_wt>(device_output + index, device_input[index]);
+    }
+    else // index % rocprim::store_count == rocprim::store_volatile
+    {
+        rocprim::thread_store<rocprim::store_volatile>(device_output + index, device_input[index]);
+    }
 }
 
-TYPED_TEST(RocprimThreadOperationTests, Store)
+TYPED_TEST(RocprimThreadOperationTests, StoreNontemporal)
 {
-    using T = typename TestFixture::type;
+    using T                              = typename TestFixture::type;
     static constexpr uint32_t block_size = 256;
-    static constexpr uint32_t grid_size = 128;
-    static constexpr uint32_t size = block_size * grid_size;
+    static constexpr uint32_t grid_size  = 128;
+    static constexpr uint32_t size       = block_size * grid_size;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> input = test_utils::get_random_data<T>(size, 2, 200, seed_value);
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
         std::vector<T> output(size);
 
         // Calculate expected results on host
         std::vector<T> expected = input;
 
         // Preparing device
-        T* device_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input),
-                                                     input.size() * sizeof(T)));
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output),
-                                                     output.size() * sizeof(T)));
+        common::device_ptr<T> device_input(input);
+        common::device_ptr<T> device_output(input.size());
 
-        HIP_CHECK(
-            hipMemcpy(
-                device_input, input.data(),
-                input.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        thread_store_kernel<T><<<grid_size, block_size>>>(device_input, device_output);
+        thread_store_kernel<T><<<grid_size, block_size>>>(device_input.get(), device_output.get());
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), device_output,
-                output.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output = device_output.load();
 
         // Verifying results
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
-
-        HIP_CHECK(hipFree(device_input));
-        HIP_CHECK(hipFree(device_output));
     }
 }
 
@@ -211,115 +292,223 @@ template<class Type, int32_t Length>
 __global__
 void thread_reduce_kernel(Type* const device_input, Type* device_output)
 {
-    size_t input_index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
-    size_t output_index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
-    device_output[output_index] = rocprim::thread_reduce<Length>(&device_input[input_index], sum_op());
+    size_t index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
+
+    device_output[index] = rocprim::thread_reduce<Length>(&device_input[index], sum_op());
+}
+
+template<class Type, int32_t Length>
+__global__
+void thread_reduce_kernel_array_prefix(Type* const device_input, Type* device_output, Type prefix)
+{
+    size_t index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
+
+    Type device_input_array[Length];
+    for(int32_t i = 0; i < Length; i++)
+    {
+        device_input_array[i] = device_input[index + i];
+    }
+
+    device_output[index] = rocprim::thread_reduce(device_input_array, sum_op(), prefix);
 }
 
 TYPED_TEST(RocprimThreadOperationTests, Reduction)
 {
-    using T = typename TestFixture::type;
-    static constexpr uint32_t length = 4;
+    using T                              = typename TestFixture::type;
+    static constexpr uint32_t length     = 4;
     static constexpr uint32_t block_size = 128 / length;
-    static constexpr uint32_t grid_size = 128;
-    static constexpr uint32_t size = block_size * grid_size * length;
-    sum_op operation;
+    static constexpr uint32_t grid_size  = 128;
+    static constexpr uint32_t size       = block_size * grid_size * length;
+    sum_op                    operation;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> input = test_utils::get_random_data<T>(size, 2, 200, seed_value);
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
         std::vector<T> output(size);
         std::vector<T> expected(size);
 
-        // Calculate expected results on host
-        for(uint32_t grid_index = 0; grid_index < grid_size; grid_index++)
+        for(uint32_t prefix = 0; prefix < 2; prefix++)
         {
-            for(uint32_t i = 0; i < block_size; i++)
+            // Calculate expected results on host
+            for(uint32_t grid_index = 0; grid_index < grid_size; grid_index++)
             {
-                uint32_t offset = (grid_index * block_size + i) * length;
-                T result = T(0);
-                for(uint32_t j = 0; j < length; j++)
+                for(uint32_t i = 0; i < block_size; i++)
                 {
-                    result = operation(result, input[offset + j]);
+                    uint32_t offset = (grid_index * block_size + i) * length;
+                    T        result = T(prefix);
+                    for(uint32_t j = 0; j < length; j++)
+                    {
+                        result = operation(result, input[offset + j]);
+                    }
+                    expected[offset] = result;
                 }
-                expected[offset] = result;
+            }
+
+            // Preparing device
+            common::device_ptr<T> device_input(input);
+            common::device_ptr<T> device_output(input.size());
+            if(prefix == 0)
+            {
+                thread_reduce_kernel<T, length>
+                    <<<grid_size, block_size>>>(device_input.get(), device_output.get());
+            }
+            else
+            {
+                thread_reduce_kernel_array_prefix<T, length>
+                    <<<grid_size, block_size>>>(device_input.get(), device_output.get(), T(prefix));
+            }
+
+            HIP_CHECK(hipGetLastError());
+
+            // Reading results back
+            output = device_output.load();
+
+            // Verifying results
+            for(size_t i = 0; i < output.size(); i += length)
+            {
+                ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output[i], expected[i]));
             }
         }
-        //std::vector<T> expected = input;
-
-        // Preparing device
-        T* device_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input),
-                                                     input.size() * sizeof(T)));
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output),
-                                                     output.size() * sizeof(T)));
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_input, input.data(),
-                input.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        thread_reduce_kernel<T, length><<<grid_size, block_size>>>(device_input, device_output);
-        HIP_CHECK(hipGetLastError());
-
-        // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), device_output,
-                output.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
-
-        // Verifying results
-        for(size_t i = 0; i < output.size(); i+=length)
-        {
-            ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output[i], expected[i]));
-        }
-
-        HIP_CHECK(hipFree(device_input));
-        HIP_CHECK(hipFree(device_output));
     }
 }
 
 template<class Type, int32_t Length>
 __global__
-void thread_scan_kernel(Type* const device_input, Type* device_output)
+void thread_scan_inclusive_kernel(Type* const device_input, Type* device_output)
 {
-    size_t input_index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
-    size_t output_index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
+    size_t index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
 
-    rocprim::thread_scan_inclusive<Length>(&device_input[input_index],
-                                                  &device_output[output_index],
-                                                  sum_op());
+    rocprim::thread_scan_inclusive<Length>(&device_input[index], &device_output[index], sum_op());
 }
 
-TYPED_TEST(RocprimThreadOperationTests, Scan)
+template<class Type, int32_t Length>
+__global__
+void thread_scan_inclusive_kernel_array_prefix(Type* const device_input,
+                                               Type*       device_output,
+                                               Type        prefix)
 {
-    using T = typename TestFixture::type;
-    static constexpr uint32_t length = 4;
-    static constexpr uint32_t block_size = 128 / length;
-    static constexpr uint32_t grid_size = 128;
-    static constexpr uint32_t size = block_size * grid_size * length;
-    sum_op operation;
+    size_t index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    Type device_input_array[Length];
+    for(int32_t i = 0; i < Length; i++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        device_input_array[i] = device_input[index + i];
+    }
+
+    rocprim::thread_scan_inclusive<Length>(&device_input[index],
+                                           &device_output[index],
+                                           sum_op(),
+                                           prefix,
+                                           threadIdx.x > 0);
+}
+
+TYPED_TEST(RocprimThreadOperationTests, ScanInclusive)
+{
+    using T                              = typename TestFixture::type;
+    static constexpr uint32_t length     = 4;
+    static constexpr uint32_t block_size = 128 / length;
+    static constexpr uint32_t grid_size  = 128;
+    static constexpr uint32_t size       = block_size * grid_size * length;
+    sum_op                    operation;
+
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
+    {
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> input = test_utils::get_random_data<T>(size, 2, 200, seed_value);
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
         std::vector<T> output(size);
         std::vector<T> expected(size);
+
+        for(uint32_t prefix = 0; prefix < 2; prefix++)
+        {
+            // Calculate expected results on host
+            for(uint32_t grid_index = 0; grid_index < grid_size; grid_index++)
+            {
+                for(uint32_t i = 0; i < block_size; i++)
+                {
+                    uint32_t offset = (grid_index * block_size + i) * length;
+                    // Skip the first value of every block
+                    T result         = i > 0 ? T(prefix) : T(0);
+                    expected[offset] = result;
+                    for(uint32_t j = 0; j < length; j++)
+                    {
+                        result               = operation(result, input[offset + j]);
+                        expected[offset + j] = result;
+                    }
+                }
+            }
+
+            // Preparing device
+            common::device_ptr<T> device_input(input);
+            common::device_ptr<T> device_output(input.size());
+            if(prefix == 0)
+            {
+                thread_scan_inclusive_kernel<T, length>
+                    <<<grid_size, block_size>>>(device_input.get(), device_output.get());
+            }
+            else
+            {
+                thread_scan_inclusive_kernel_array_prefix<T, length>
+                    <<<grid_size, block_size>>>(device_input.get(), device_output.get(), T(prefix));
+            }
+            HIP_CHECK(hipGetLastError());
+
+            // Reading results back
+            output = device_output.load();
+
+            // Verifying results
+            ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
+        }
+    }
+}
+
+template<class Type, int32_t Length>
+__global__
+void thread_scan_exclusive_kernel(Type* const device_input, Type* device_output, Type prefix)
+{
+    size_t index = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
+
+    Type device_input_array[Length];
+    for(int32_t i = 0; i < Length; i++)
+    {
+        device_input_array[i] = device_input[index + i];
+    }
+
+    rocprim::thread_scan_exclusive<Length>(&device_input[index],
+                                           &device_output[index],
+                                           sum_op(),
+                                           prefix,
+                                           threadIdx.x > 0);
+}
+
+TYPED_TEST(RocprimThreadOperationTests, ScanExclusive)
+{
+    using T                              = typename TestFixture::type;
+    static constexpr uint32_t length     = 4;
+    static constexpr uint32_t block_size = 128 / length;
+    static constexpr uint32_t grid_size  = 128;
+    static constexpr uint32_t size       = block_size * grid_size * length;
+    sum_op                    operation;
+
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
+    {
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
+        SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
+
+        // Generate data
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
+        std::vector<T> output(size);
+        std::vector<T> expected(size);
+        T              prefix = test_utils::get_random_value<T>(2, 200, seed_value);
 
         // Calculate expected results on host
         for(uint32_t grid_index = 0; grid_index < grid_size; grid_index++)
@@ -327,49 +516,41 @@ TYPED_TEST(RocprimThreadOperationTests, Scan)
             for(uint32_t i = 0; i < block_size; i++)
             {
                 uint32_t offset = (grid_index * block_size + i) * length;
-                T result = input[offset];
-                expected[offset] = result;
+
+                // Initialize the scan with the first value and apply prefix if needed
+                T inclusive = input[offset];
+                inclusive   = i > 0 ? operation(prefix, inclusive) : inclusive;
+
+                // First output value is the prefix
+                expected[offset] = prefix;
+
+                // Exclusive value to track for the next element
+                T exclusive = inclusive;
+
+                // Perform the rest of the scan
                 for(uint32_t j = 1; j < length; j++)
                 {
-                    result = operation(result, input[offset + j]);
-                    expected[offset + j] = result;
+                    inclusive            = operation(exclusive, input[offset + j]);
+                    expected[offset + j] = exclusive;
+                    exclusive            = inclusive;
                 }
             }
         }
 
         // Preparing device
-        T* device_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input),
-                                                     input.size() * sizeof(T)));
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output),
-                                                     output.size() * sizeof(T)));
+        common::device_ptr<T> device_input(input);
+        common::device_ptr<T> device_output(input.size());
 
-        HIP_CHECK(
-            hipMemcpy(
-                device_input, input.data(),
-                input.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
+        thread_scan_exclusive_kernel<T, length>
+            <<<grid_size, block_size>>>(device_input.get(), device_output.get(), prefix);
 
-        thread_scan_kernel<T, length><<<grid_size, block_size>>>(device_input, device_output);
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), device_output,
-                output.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output = device_output.load();
 
         // Verifying results
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
-
-        HIP_CHECK(hipFree(device_input));
-        HIP_CHECK(hipFree(device_output));
     }
 }
 
@@ -407,6 +588,30 @@ __global__ void thread_search_kernel(Type* const    device_input1,
     device_output_y[id] = coord.y;
 }
 
+template<class Type, class OffsetT, class BinaryFunction>
+__global__
+void thread_search_out_of_bounds_kernel(Type* const    device_input1,
+                                        Type* const    device_input2,
+                                        OffsetT*       device_output_x,
+                                        OffsetT*       device_output_y,
+                                        const OffsetT  input1_size,
+                                        const OffsetT  input2_size,
+                                        BinaryFunction bin_op)
+{
+    const OffsetT        partition_id = input1_size + input2_size + 1;
+    CoordinateT<OffsetT> coord;
+    rocprim::merge_path_search(partition_id,
+                               device_input1,
+                               device_input2,
+                               input1_size,
+                               input2_size,
+                               coord,
+                               bin_op);
+
+    *device_output_x = coord.x;
+    *device_output_y = coord.y;
+}
+
 template<class T, class OffsetT, class BinaryFunction>
 void merge_path_search_test()
 {
@@ -418,66 +623,56 @@ void merge_path_search_test()
 
     BinaryFunction bin_op;
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> input1 = test_utils::get_random_data<T>(size, 2, 200, seed_value);
-        std::vector<T> input2 = test_utils::get_random_data<T>(size, 2, 200, seed_value);
+        std::vector<T> input1 = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
+        std::vector<T> input2 = test_utils::get_random_data_wrapped<T>(size, 2, 200, seed_value);
 
         std::sort(input1.begin(), input1.end(), bin_op);
         std::sort(input2.begin(), input2.end(), bin_op);
 
-        std::vector<OffsetT> output_x(index_size);
-        std::vector<OffsetT> output_y(index_size);
+        std::vector<OffsetT> output_x;
+        std::vector<OffsetT> output_y;
+        OffsetT              output_oob_x, output_oob_y;
 
         // Preparing device
-        T* device_input1;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input1),
-                                                     input1.size() * sizeof(T)));
-        T* device_input2;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_input2),
-                                                     input2.size() * sizeof(T)));
-        OffsetT* device_output_x;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output_x),
-                                                     output_x.size() * sizeof(OffsetT)));
-        OffsetT* device_output_y;
-        HIP_CHECK(test_common_utils::hipMallocHelper(reinterpret_cast<void**>(&device_output_y),
-                                                     output_y.size() * sizeof(OffsetT)));
-
-        HIP_CHECK(hipMemcpy(device_input1,
-                            input1.data(),
-                            input1.size() * sizeof(T),
-                            hipMemcpyHostToDevice));
-
-        HIP_CHECK(hipMemcpy(device_input2,
-                            input2.data(),
-                            input2.size() * sizeof(T),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<T>       device_input1(input1);
+        common::device_ptr<T>       device_input2(input2);
+        common::device_ptr<OffsetT> device_output_x(index_size);
+        common::device_ptr<OffsetT> device_output_y(index_size);
+        common::device_ptr<OffsetT> device_output_oob_x(1);
+        common::device_ptr<OffsetT> device_output_oob_y(1);
 
         thread_search_kernel<T, OffsetT, BinaryFunction, length>
-            <<<grid_size, block_size>>>(device_input1,
-                                        device_input2,
-                                        device_output_x,
-                                        device_output_y,
+            <<<grid_size, block_size>>>(device_input1.get(),
+                                        device_input2.get(),
+                                        device_output_x.get(),
+                                        device_output_y.get(),
+                                        input1.size(),
+                                        input2.size(),
+                                        bin_op);
+        HIP_CHECK(hipGetLastError());
+
+        thread_search_out_of_bounds_kernel<T, OffsetT, BinaryFunction>
+            <<<grid_size, block_size>>>(device_input1.get(),
+                                        device_input2.get(),
+                                        device_output_oob_x.get(),
+                                        device_output_oob_y.get(),
                                         input1.size(),
                                         input2.size(),
                                         bin_op);
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(hipMemcpy(output_x.data(),
-                            device_output_x,
-                            output_x.size() * sizeof(OffsetT),
-                            hipMemcpyDeviceToHost));
-
-        HIP_CHECK(hipMemcpy(output_y.data(),
-                            device_output_y,
-                            output_y.size() * sizeof(OffsetT),
-                            hipMemcpyDeviceToHost));
+        output_x     = device_output_x.load();
+        output_y     = device_output_y.load();
+        output_oob_x = device_output_oob_x.load()[0];
+        output_oob_y = device_output_oob_y.load()[0];
 
         std::vector<T> combined_input(2 * size);
         std::merge(input1.begin(),
@@ -486,6 +681,9 @@ void merge_path_search_test()
                    input2.end(),
                    combined_input.begin(),
                    bin_op);
+
+        ASSERT_EQ(output_oob_x, input1.size());
+        ASSERT_EQ(output_oob_y, input2.size());
 
         OffsetT slice_index = 0;
         for(OffsetT i = 0; i < index_size - 1; i++)
@@ -509,11 +707,6 @@ void merge_path_search_test()
 
             slice_index += length;
         }
-
-        HIP_CHECK(hipFree(device_input1));
-        HIP_CHECK(hipFree(device_input2));
-        HIP_CHECK(hipFree(device_output_x));
-        HIP_CHECK(hipFree(device_output_y));
     }
 }
 
@@ -523,4 +716,77 @@ TYPED_TEST(RocprimThreadOperationTests, Search)
     using OffsetT = unsigned int;
     merge_path_search_test<T, OffsetT, rocprim::less<T>>();
     merge_path_search_test<T, OffsetT, rocprim::greater<T>>();
+}
+
+template<class Type, class OffsetT, OffsetT Length>
+__global__
+void upper_lower_bound_kernel(Type* const device_input, OffsetT* device_output, Type value)
+{
+    size_t index_input  = (blockIdx.x * blockDim.x + threadIdx.x) * Length;
+    size_t index_output = (blockIdx.x * blockDim.x + threadIdx.x) * 3;
+
+    device_output[index_output] = rocprim::lower_bound(&device_input[index_input], Length, value);
+    device_output[index_output + 1]
+        = rocprim::upper_bound(&device_input[index_input], Length, value);
+    device_output[index_output + 2]
+        = rocprim::static_upper_bound<Length>(&device_input[index_input], Length, value);
+}
+
+TYPED_TEST(RocprimThreadOperationTests, UpperLowerBound)
+{
+    using T                              = typename TestFixture::type;
+    using OffsetT                        = uint32_t;
+    static constexpr uint32_t length     = 16;
+    static constexpr uint32_t block_size = 256 / length;
+    static constexpr uint32_t grid_size  = 128;
+    static constexpr uint32_t size       = block_size * grid_size * length;
+
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
+    {
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
+        SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
+
+        // Generate data
+        std::vector<T> input = test_utils::get_random_data_wrapped<T>(size, 1, 10, seed_value);
+        std::vector<OffsetT> output(block_size * grid_size * 3);
+        std::vector<OffsetT> expected(block_size * grid_size * 3);
+        T                    value = test_utils::get_random_value<T>(1, 10, seed_value);
+
+        // Calculate expected results on host
+        for(uint32_t grid_index = 0; grid_index < grid_size; grid_index++)
+        {
+            for(uint32_t i = 0; i < block_size; i++)
+            {
+                uint32_t offset          = (grid_index * block_size + i) * length;
+                uint32_t offset_expected = (grid_index * block_size + i) * 3;
+
+                expected[offset_expected] = std::lower_bound(input.begin() + offset,
+                                                             input.begin() + offset + length,
+                                                             value)
+                                            - (input.begin() + offset);
+                expected[offset_expected + 1] = std::upper_bound(input.begin() + offset,
+                                                                 input.begin() + offset + length,
+                                                                 value)
+                                                - (input.begin() + offset);
+
+                expected[offset_expected + 2] = expected[offset_expected + 1];
+            }
+        }
+
+        // Preparing device
+        common::device_ptr<T>       device_input(input);
+        common::device_ptr<OffsetT> device_output(output.size());
+
+        upper_lower_bound_kernel<T, OffsetT, length>
+            <<<grid_size, block_size>>>(device_input.get(), device_output.get(), value);
+
+        HIP_CHECK(hipGetLastError());
+
+        // Reading results back
+        output = device_output.load();
+
+        // Verifying results
+        ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
+    }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -27,7 +27,6 @@
 #include "../detail/various.hpp"
 #include "../functional.hpp"
 #include "../intrinsics/thread.hpp"
-#include "../thread/radix_key_codec.hpp"
 #include "../types.hpp"
 
 #include "../warp/warp_exchange.hpp"
@@ -45,12 +44,12 @@ BEGIN_ROCPRIM_NAMESPACE
 /// methods for sorting of items (keys or key-value pairs) partitioned across threads in a block
 /// using radix sort algorithm.
 ///
-/// \tparam Key - the key type.
-/// \tparam BlockSize - the number of threads in a block.
-/// \tparam ItemsPerThread - the number of items contributed by each thread.
-/// \tparam Value - the value type. Default type empty_type indicates
+/// \tparam Key the key type.
+/// \tparam BlockSize the number of threads in a block.
+/// \tparam ItemsPerThread the number of items contributed by each thread.
+/// \tparam Value the value type. Default type empty_type indicates
 /// a keys-only sort.
-/// \tparam RadixBitsPerPass - amount of bits to sort per pass. The Default is 4.
+/// \tparam RadixBitsPerPass amount of bits to sort per pass. The Default is 4.
 /// \tparam RadixRankAlgorithm the rank algorithm used.
 ///
 /// \par Overview
@@ -99,42 +98,72 @@ BEGIN_ROCPRIM_NAMESPACE
 template<class Key,
          unsigned int BlockSizeX,
          unsigned int ItemsPerThread,
-         class Value             = empty_type,
-         unsigned int BlockSizeY = 1,
-         unsigned int BlockSizeZ = 1,
-         unsigned int RadixBitsPerPass
-         = (BlockSizeX * BlockSizeY * BlockSizeZ) % arch::wavefront::min_size() == 0 ? 8 /* match */
-                                                                            : 4 /* basic_memoize */,
+         class Value                                 = empty_type,
+         unsigned int               BlockSizeY       = 1,
+         unsigned int               BlockSizeZ       = 1,
+         unsigned int               RadixBitsPerPass = 0,
          block_radix_rank_algorithm RadixRankAlgorithm
-         = (BlockSizeX * BlockSizeY * BlockSizeZ) % arch::wavefront::min_size() == 0
-               ? block_radix_rank_algorithm::match
-               : block_radix_rank_algorithm::basic_memoize,
-         block_padding_hint PaddingHint = block_padding_hint::lds_occupancy_bound>
+         = block_radix_rank_algorithm::default_for_radix_sort,
+         block_padding_hint      PaddingHint    = block_padding_hint::lds_occupancy_bound,
+         arch::wavefront::target TargetWaveSize = arch::wavefront::get_target()>
 class block_radix_sort
 {
-    static_assert(RadixBitsPerPass > 0 && RadixBitsPerPass < 32,
-                  "The RadixBitsPerPass should be larger than 0 and smaller than the size "
+    // TODO: somehow when prefer_match is true on SPIR-V, results
+    // are incorrect. Block radix rank works fine though...
+    static constexpr bool prefer_match = (BlockSizeX * BlockSizeY * BlockSizeZ)
+                                             % arch::wavefront::size_from_target<TargetWaveSize>()
+                                         == 0;
+
+    static constexpr unsigned int radix_bits_per_pass = RadixBitsPerPass == 0
+                                                            ? (prefer_match ? 8 /* match */
+                                                                            : 4 /* basic_memoize */)
+                                                            : RadixBitsPerPass;
+
+    static constexpr block_radix_rank_algorithm radix_rank_algorithm
+        = RadixRankAlgorithm == block_radix_rank_algorithm::default_for_radix_sort
+              ? (prefer_match ? block_radix_rank_algorithm::match
+                              : block_radix_rank_algorithm::basic_memoize)
+              : RadixRankAlgorithm;
+
+    static_assert(radix_bits_per_pass > 0 && radix_bits_per_pass < 32,
+                  "The radix_bits_per_pass should be larger than 0 and smaller than the size "
                   "of an unsigned int");
 
     static constexpr unsigned int BlockSize   = BlockSizeX * BlockSizeY * BlockSizeZ;
     static constexpr bool         with_values = !std::is_same<Value, empty_type>::value;
-    static constexpr bool warp_striped = RadixRankAlgorithm == block_radix_rank_algorithm::match;
+    static constexpr bool warp_striped = radix_rank_algorithm == block_radix_rank_algorithm::match;
 
-#if __HIP_DEVICE_COMPILE__
-    static_assert(!warp_striped || (BlockSize % arch::wavefront::min_size()) == 0,
-                  "When using 'block_radix_rank_algorithm::match', the block size should be a "
-                  "multiple of the warp size");
-#endif
+    ROCPRIM_DETAIL_DEVICE_STATIC_ASSERT(
+        !warp_striped || (BlockSize % ::rocprim::arch::wavefront::min_size()) == 0,
+        "When using 'block_radix_rank_algorithm::match', the block size should be a "
+        "multiple of the warp size");
 
     static constexpr bool is_key_and_value_aligned
         = alignof(Key) == alignof(Value) && sizeof(Key) == sizeof(Value);
 
-    using block_rank_type = ::rocprim::
-        block_radix_rank<BlockSizeX, RadixBitsPerPass, RadixRankAlgorithm, BlockSizeY, BlockSizeZ, PaddingHint>;
-    using keys_exchange_type
-        = ::rocprim::block_exchange<Key, BlockSizeX, ItemsPerThread, BlockSizeY, BlockSizeZ, PaddingHint>;
-    using values_exchange_type
-        = ::rocprim::block_exchange<Value, BlockSizeX, ItemsPerThread, BlockSizeY, BlockSizeZ, PaddingHint>;
+    using block_rank_type = ::rocprim::block_radix_rank<BlockSizeX,
+                                                        radix_bits_per_pass,
+                                                        radix_rank_algorithm,
+                                                        BlockSizeY,
+                                                        BlockSizeZ,
+                                                        PaddingHint,
+                                                        TargetWaveSize>;
+
+    using keys_exchange_type = ::rocprim::block_exchange<Key,
+                                                         BlockSizeX,
+                                                         ItemsPerThread,
+                                                         BlockSizeY,
+                                                         BlockSizeZ,
+                                                         PaddingHint,
+                                                         TargetWaveSize>;
+
+    using values_exchange_type = ::rocprim::block_exchange<Value,
+                                                           BlockSizeX,
+                                                           ItemsPerThread,
+                                                           BlockSizeY,
+                                                           BlockSizeZ,
+                                                           PaddingHint,
+                                                           TargetWaveSize>;
 
     // Struct used for creating a raw_storage object for this primitive's temporary storage.
     union storage_type_
@@ -161,7 +190,7 @@ public:
     using storage_type = storage_type_; // only for Doxygen
 #endif
 
-    ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE
+        ROCPRIM_DEVICE ROCPRIM_FORCE_INLINE
     block_radix_sort()
     {
         assert(!warp_striped || BlockSize % ::rocprim::arch::wavefront::size() == 0);
@@ -171,11 +200,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -231,10 +260,10 @@ public:
     /// * This overload does not accept storage argument. Required shared memory is
     /// allocated by the method itself.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -254,11 +283,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -316,10 +345,10 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -342,12 +371,12 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -412,11 +441,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -441,12 +470,12 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -511,11 +540,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -538,11 +567,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -601,10 +630,10 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -625,11 +654,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -688,10 +717,10 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -715,12 +744,12 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -783,11 +812,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -812,12 +841,12 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -881,11 +910,11 @@ public:
     ///
     /// \tparam Decomposer The type of the decomposer argument. Defaults to the identity decomposer.
     ///
-    /// \param [in, out] keys - reference to an array of keys provided by a thread.
-    /// \param [in, out] values - reference to an array of values provided by a thread.
-    /// \param [in] begin_bit - [optional] index of the first (least significant) bit used in
+    /// \param [in, out] keys reference to an array of keys provided by a thread.
+    /// \param [in, out] values reference to an array of values provided by a thread.
+    /// \param [in] begin_bit [optional] index of the first (least significant) bit used in
     /// key comparison. Must be in range <tt>[0; 8 * sizeof(Key))</tt>. Default value: \p 0.
-    /// \param [in] end_bit - [optional] past-the-end index (most significant) bit used in
+    /// \param [in] end_bit [optional] past-the-end index (most significant) bit used in
     /// key comparison. Must be in range <tt>(begin_bit; 8 * sizeof(Key)]</tt>. Default
     /// value: \p <tt>8 * sizeof(Key)</tt>.
     /// \param [in] decomposer [optional] If `Key` is not an arithmetic type (integral, floating point),
@@ -1066,9 +1095,6 @@ public:
     }
 
 private:
-    static constexpr bool use_warp_exchange
-        = arch::wavefront::min_size() % ItemsPerThread == 0 && ItemsPerThread <= 4;
-
     template<class SortedValue>
     ROCPRIM_DEVICE ROCPRIM_INLINE
     void blocked_to_warp_striped(Key (&keys)[ItemsPerThread],
@@ -1077,7 +1103,7 @@ private:
                                  std::false_type)
     {
         keys_exchange_type().blocked_to_warp_striped(keys, keys, storage.get().keys_exchange);
-        if ROCPRIM_IF_CONSTEXPR(is_key_and_value_aligned)
+        if constexpr(is_key_and_value_aligned)
         {
             // If keys and values are aligned, then the LDS for both exchanges is
             // local per wave. We can relax the data dependency!
@@ -1099,9 +1125,14 @@ private:
                                  storage_type& /* storage */,
                                  std::true_type)
     {
-        ::rocprim::warp_exchange<Key, ItemsPerThread>{}.blocked_to_striped_shuffle(keys, keys);
-        ::rocprim::warp_exchange<SortedValue, ItemsPerThread>{}.blocked_to_striped_shuffle(values,
-                                                                                           values);
+        constexpr int wave_size = ::rocprim::arch::wavefront::size_from_target<TargetWaveSize>();
+        using keys_warp_exchange
+            = ::rocprim::warp_exchange<Key, ItemsPerThread, wave_size, TargetWaveSize>;
+        using values_warp_exchange
+            = ::rocprim::warp_exchange<SortedValue, ItemsPerThread, wave_size, TargetWaveSize>;
+
+        keys_warp_exchange{}.blocked_to_striped_shuffle(keys, keys);
+        values_warp_exchange{}.blocked_to_striped_shuffle(values, values);
     }
 
     template<bool Descending,
@@ -1117,7 +1148,8 @@ private:
                    unsigned int  end_bit,
                    Decomposer    decomposer)
     {
-        using key_codec = ::rocprim::radix_key_codec<Key, Descending>;
+        using key_codec
+            = decltype(::rocprim::traits::get<Key>().template radix_key_codec<Descending>());
 
         // 'rank_keys' may be invoked multiple times. We encode the key once and move the
         // encoded during the majority of sort to save on some compute.
@@ -1129,11 +1161,12 @@ private:
 
         // If we're using warp striped radix rank but our input is in a blocked layout, we
         // can emulate the correct input through an exchange to a warp striped layout.
-        if ROCPRIM_IF_CONSTEXPR(TryEmulateWarpStriped && warp_striped && ItemsPerThread > 1)
+        if constexpr(TryEmulateWarpStriped && warp_striped && ItemsPerThread > 1)
         {
             // This appears to be slower with high large items per thread.
             constexpr bool use_warp_exchange
-                = arch::wavefront::min_size() % ItemsPerThread == 0 && ItemsPerThread <= 4;
+                = arch::wavefront::size_from_target<TargetWaveSize>() % ItemsPerThread == 0
+                  && ItemsPerThread <= 4;
             blocked_to_warp_striped(keys,
                                     values,
                                     storage,
@@ -1146,7 +1179,7 @@ private:
         unsigned int ranks[ItemsPerThread];
         while(true)
         {
-            const int pass_bits = min(RadixBitsPerPass, end_bit - begin_bit);
+            const int pass_bits = min(radix_bits_per_pass, end_bit - begin_bit);
 
             block_rank_type().rank_keys(
                 keys,
@@ -1154,14 +1187,14 @@ private:
                 storage.get().rank,
                 [begin_bit, pass_bits, decomposer](const Key& key) mutable
                 { return key_codec::extract_digit(key, begin_bit, pass_bits, decomposer); });
-            begin_bit += RadixBitsPerPass;
+            begin_bit += radix_bits_per_pass;
 
             if(begin_bit >= end_bit)
             {
                 break;
             }
 
-            if ROCPRIM_IF_CONSTEXPR(warp_striped)
+            if constexpr(warp_striped)
             {
                 exchange_keys_warp_striped(storage, keys, ranks);
                 exchange_values_warp_striped(storage, values, ranks);
@@ -1176,7 +1209,7 @@ private:
             ::rocprim::syncthreads();
         }
 
-        if ROCPRIM_IF_CONSTEXPR(ToStriped)
+        if constexpr(ToStriped)
         {
             exchange_to_striped_keys(storage, keys, ranks);
             exchange_to_striped_values(storage, values, ranks);
@@ -1291,6 +1324,100 @@ private:
         (void)values;
     }
 };
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+template<class Key,
+         unsigned int BlockSizeX,
+         unsigned int ItemsPerThread,
+         class Value,
+         unsigned int               BlockSizeY,
+         unsigned int               BlockSizeZ,
+         unsigned int               RadixBitsPerPass,
+         block_radix_rank_algorithm RadixRankAlgorithm,
+         block_padding_hint         PaddingHint>
+class block_radix_sort<Key,
+                       BlockSizeX,
+                       ItemsPerThread,
+                       Value,
+                       BlockSizeY,
+                       BlockSizeZ,
+                       RadixBitsPerPass,
+                       RadixRankAlgorithm,
+                       PaddingHint,
+                       arch::wavefront::target::dynamic>
+{
+    using block_radix_sort_wave32 = block_radix_sort<Key,
+                                                     BlockSizeX,
+                                                     ItemsPerThread,
+                                                     Value,
+                                                     BlockSizeY,
+                                                     BlockSizeZ,
+                                                     RadixBitsPerPass,
+                                                     RadixRankAlgorithm,
+                                                     PaddingHint,
+                                                     arch::wavefront::target::size32>;
+    using block_radix_sort_wave64 = block_radix_sort<Key,
+                                                     BlockSizeX,
+                                                     ItemsPerThread,
+                                                     Value,
+                                                     BlockSizeY,
+                                                     BlockSizeZ,
+                                                     RadixBitsPerPass,
+                                                     RadixRankAlgorithm,
+                                                     PaddingHint,
+                                                     arch::wavefront::target::size64>;
+
+    using dispatch = detail::dispatch_wave_size<block_radix_sort_wave32, block_radix_sort_wave64>;
+
+public:
+    using storage_type = typename dispatch::storage_type;
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.sort(args...); }, args...);
+    }
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort_desc(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.sort_desc(args...); }, args...);
+    }
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort_to_striped(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.sort_to_striped(args...); }, args...);
+    }
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort_desc_to_striped(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.sort_desc_to_striped(args...); }, args...);
+    }
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort_warp_striped_to_striped(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.sort_warp_striped_to_striped(args...); },
+                   args...);
+    }
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto sort_desc_warp_striped_to_striped(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args)
+                   { impl.sort_desc_warp_striped_to_striped(args...); },
+                   args...);
+    }
+};
+#endif // DOXYGEN_SHOULD_SKIP_THIS
 
 END_ROCPRIM_NAMESPACE
 

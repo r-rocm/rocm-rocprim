@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -24,20 +24,32 @@
 #define ROCPRIM_BENCHMARK_DEVICE_SELECT_PARALLEL_HPP_
 
 #include "benchmark_utils.hpp"
+
+#include "../common/utils_data_generation.hpp"
+#include "../common/utils_device_ptr.hpp"
+
 #include "cmdparser.hpp"
 
 #include <benchmark/benchmark.h>
 
-#include <rocprim/rocprim.hpp>
-
 #include <hip/hip_runtime.h>
 
-#include <algorithm>
-#include <limits>
-#include <memory>
+#include <rocprim/device/config_types.hpp>
+#include <rocprim/device/device_select.hpp>
+#include <rocprim/functional.hpp>
+#include <rocprim/types.hpp>
+#ifdef BENCHMARK_CONFIG_TUNING
+    #include <rocprim/device/detail/device_config_helper.hpp>
+#endif
+
+#include <cstddef>
 #include <string>
 #include <type_traits>
 #include <vector>
+#ifdef BENCHMARK_CONFIG_TUNING
+    #include <algorithm>
+    #include <memory>
+#endif
 
 enum class select_probability
 {
@@ -74,14 +86,11 @@ inline const char* get_probability_name(select_probability probability)
     return "invalid";
 }
 
-constexpr int warmup_iter = 5;
-constexpr int batch_size  = 10;
-
-template<class DataType,
-         class Config                   = rocprim::default_config,
-         class FlagType                 = char,
+template<typename DataType,
+         typename Config                = rocprim::default_config,
+         typename FlagType              = char,
          select_probability Probability = select_probability::tuning>
-struct device_select_flag_benchmark : public config_autotune_interface
+struct device_select_flag_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -93,18 +102,20 @@ struct device_select_flag_benchmark : public config_autotune_interface
                                          + ",cfg:" + partition_config_name<Config>() + "}");
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
-        // Calculate the number of elements 
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
+        // Calculate the number of elements
         size_t size = bytes / sizeof(DataType);
 
-        std::vector<DataType> input = get_random_data<DataType>(size,
-                                                                generate_limits<DataType>::min(),
-                                                                generate_limits<DataType>::max(),
-                                                                seed.get_0());
+        std::vector<DataType> input
+            = get_random_data<DataType>(size,
+                                        common::generate_limits<DataType>::min(),
+                                        common::generate_limits<DataType>::max(),
+                                        seed.get_0());
 
         std::vector<FlagType> flags_0;
         std::vector<FlagType> flags_1;
@@ -121,35 +132,20 @@ struct device_select_flag_benchmark : public config_autotune_interface
             flags_0 = get_random_data01<FlagType>(size, get_probability(Probability), seed.get_1());
         }
 
-        DataType* d_input{};
-        HIP_CHECK(hipMalloc(&d_input, size * sizeof(*d_input)));
-        HIP_CHECK(hipMemcpy(d_input, input.data(), size * sizeof(*d_input), hipMemcpyHostToDevice));
+        common::device_ptr<DataType> d_input(input);
 
-        FlagType* d_flags_0{};
-        FlagType* d_flags_1{};
-        FlagType* d_flags_2{};
-        HIP_CHECK(hipMalloc(&d_flags_0, size * sizeof(*d_flags_0)));
-        HIP_CHECK(
-            hipMemcpy(d_flags_0, flags_0.data(), size * sizeof(*d_flags_0), hipMemcpyHostToDevice));
+        common::device_ptr<FlagType> d_flags_0(flags_0);
+        common::device_ptr<FlagType> d_flags_1;
+        common::device_ptr<FlagType> d_flags_2;
         if(is_tuning)
         {
-            HIP_CHECK(hipMalloc(&d_flags_1, size * sizeof(*d_flags_1)));
-            HIP_CHECK(hipMemcpy(d_flags_1,
-                                flags_1.data(),
-                                size * sizeof(*d_flags_1),
-                                hipMemcpyHostToDevice));
-            HIP_CHECK(hipMalloc(&d_flags_2, size * sizeof(*d_flags_2)));
-            HIP_CHECK(hipMemcpy(d_flags_2,
-                                flags_2.data(),
-                                size * sizeof(*d_flags_2),
-                                hipMemcpyHostToDevice));
+            d_flags_1.store(flags_1);
+            d_flags_2.store(flags_2);
         }
 
-        DataType* d_output{};
-        HIP_CHECK(hipMalloc(&d_output, size * sizeof(*d_output)));
+        common::device_ptr<DataType> d_output(size);
 
-        unsigned int* d_selected_count_output{};
-        HIP_CHECK(hipMalloc(&d_selected_count_output, sizeof(*d_selected_count_output)));
+        common::device_ptr<unsigned int> d_selected_count_output(1);
 
         const auto dispatch = [&](void* d_temp_storage, size_t& temp_storage_size_bytes)
         {
@@ -157,78 +153,39 @@ struct device_select_flag_benchmark : public config_autotune_interface
             {
                 HIP_CHECK(rocprim::select<Config>(d_temp_storage,
                                                   temp_storage_size_bytes,
-                                                  d_input,
+                                                  d_input.get(),
                                                   d_flags,
-                                                  d_output,
-                                                  d_selected_count_output,
+                                                  d_output.get(),
+                                                  d_selected_count_output.get(),
                                                   size,
                                                   stream));
             };
 
-            dispatch_flags(d_flags_0);
+            dispatch_flags(d_flags_0.get());
             if(is_tuning)
             {
-                dispatch_flags(d_flags_1);
-                dispatch_flags(d_flags_2);
+                dispatch_flags(d_flags_1.get());
+                dispatch_flags(d_flags_2.get());
             }
         };
 
         // Allocate temporary storage memory
         size_t temp_storage_size_bytes{};
         dispatch(nullptr, temp_storage_size_bytes);
-        void* d_temp_storage{};
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-        for(int i = 0; i < warmup_iter; i++)
-        {
-            dispatch(d_temp_storage, temp_storage_size_bytes);
-        }
-        HIP_CHECK(hipDeviceSynchronize());
+        state.run([&] { dispatch(d_temp_storage.get(), temp_storage_size_bytes); });
 
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            HIP_CHECK(hipEventRecord(start, stream));
-            for(int i = 0; i < batch_size; ++i)
-            {
-                dispatch(d_temp_storage, temp_storage_size_bytes);
-            }
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds{};
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(DataType));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        HIP_CHECK(hipFree(d_input));
-        if(is_tuning)
-        {
-            HIP_CHECK(hipFree(d_flags_2));
-            HIP_CHECK(hipFree(d_flags_1));
-        }
-        HIP_CHECK(hipFree(d_flags_0));
-        HIP_CHECK(hipFree(d_output));
-        HIP_CHECK(hipFree(d_selected_count_output));
-        HIP_CHECK(hipFree(d_temp_storage));
+        state.set_throughput(size, sizeof(DataType));
     }
 
     static constexpr bool is_tuning = Probability == select_probability::tuning;
 };
 
-template<class DataType,
-         class Config                   = rocprim::default_config,
+template<typename DataType,
+         typename Config                = rocprim::default_config,
          select_probability Probability = select_probability::tuning>
-struct device_select_predicate_benchmark : public config_autotune_interface
+struct device_select_predicate_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -239,12 +196,13 @@ struct device_select_predicate_benchmark : public config_autotune_interface
                                          + ",cfg:" + partition_config_name<Config>() + "}");
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
-        // Calculate the number of elements 
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
+        // Calculate the number of elements
         size_t size = bytes / sizeof(DataType);
 
         // all data types can represent [0, 127], -1 so a predicate can select all
@@ -253,15 +211,11 @@ struct device_select_predicate_benchmark : public config_autotune_interface
                                                                 static_cast<DataType>(126),
                                                                 seed.get_0());
 
-        DataType* d_input;
-        HIP_CHECK(hipMalloc(&d_input, size * sizeof(*d_input)));
-        HIP_CHECK(hipMemcpy(d_input, input.data(), size * sizeof(*d_input), hipMemcpyHostToDevice));
+        common::device_ptr<DataType> d_input(input);
 
-        DataType* d_output;
-        HIP_CHECK(hipMalloc(&d_output, size * sizeof(*d_output)));
+        common::device_ptr<DataType> d_output(size);
 
-        unsigned int* d_selected_count_output;
-        HIP_CHECK(hipMalloc(&d_selected_count_output, sizeof(*d_selected_count_output)));
+        common::device_ptr<unsigned int> d_selected_count_output(1);
 
         const auto dispatch = [&](void* d_temp_storage, size_t& temp_storage_size_bytes)
         {
@@ -271,9 +225,9 @@ struct device_select_predicate_benchmark : public config_autotune_interface
                 { return value < static_cast<DataType>(127 * probability); };
                 HIP_CHECK(rocprim::select<Config>(d_temp_storage,
                                                   temp_storage_size_bytes,
-                                                  d_input,
-                                                  d_output,
-                                                  d_selected_count_output,
+                                                  d_input.get(),
+                                                  d_output.get(),
+                                                  d_selected_count_output.get(),
                                                   size,
                                                   predicate,
                                                   stream));
@@ -293,54 +247,21 @@ struct device_select_predicate_benchmark : public config_autotune_interface
 
         size_t temp_storage_size_bytes{};
         dispatch(nullptr, temp_storage_size_bytes);
-        void* d_temp_storage{};
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-        for(int i = 0; i < warmup_iter; ++i)
-        {
-            dispatch(d_temp_storage, temp_storage_size_bytes);
-        }
-        HIP_CHECK(hipDeviceSynchronize());
+        state.run([&] { dispatch(d_temp_storage.get(), temp_storage_size_bytes); });
 
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            HIP_CHECK(hipEventRecord(start, stream));
-            for(int i = 0; i < batch_size; ++i)
-            {
-                dispatch(d_temp_storage, temp_storage_size_bytes);
-            }
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds{};
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(DataType));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        HIP_CHECK(hipFree(d_input));
-        HIP_CHECK(hipFree(d_output));
-        HIP_CHECK(hipFree(d_selected_count_output));
-        HIP_CHECK(hipFree(d_temp_storage));
+        state.set_throughput(size, sizeof(DataType));
     }
 
     static constexpr bool is_tuning = Probability == select_probability::tuning;
 };
 
-template<class DataType,
-         class FlagType                 = int,
-         class Config                   = rocprim::default_config,
+template<typename DataType,
+         typename FlagType              = int,
+         typename Config                = rocprim::default_config,
          select_probability Probability = select_probability::tuning>
-struct device_select_predicated_flag_benchmark : public config_autotune_interface
+struct device_select_predicated_flag_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -352,18 +273,20 @@ struct device_select_predicated_flag_benchmark : public config_autotune_interfac
             + get_probability_name(Probability) + ",cfg:" + partition_config_name<Config>() + "}");
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
         // Calculate the number of elements
         size_t size = bytes / sizeof(DataType);
 
-        std::vector<DataType> input = get_random_data<DataType>(size,
-                                                                generate_limits<DataType>::min(),
-                                                                generate_limits<DataType>::max(),
-                                                                seed.get_0());
+        std::vector<DataType> input
+            = get_random_data<DataType>(size,
+                                        common::generate_limits<DataType>::min(),
+                                        common::generate_limits<DataType>::max(),
+                                        seed.get_0());
 
         std::vector<FlagType> flags_0;
         std::vector<FlagType> flags_1;
@@ -380,35 +303,20 @@ struct device_select_predicated_flag_benchmark : public config_autotune_interfac
             flags_0 = get_random_data01<FlagType>(size, get_probability(Probability), seed.get_1());
         }
 
-        DataType* d_input{};
-        HIP_CHECK(hipMalloc(&d_input, size * sizeof(*d_input)));
-        HIP_CHECK(hipMemcpy(d_input, input.data(), size * sizeof(*d_input), hipMemcpyHostToDevice));
+        common::device_ptr<DataType> d_input(input);
 
-        FlagType* d_flags_0{};
-        FlagType* d_flags_1{};
-        FlagType* d_flags_2{};
-        HIP_CHECK(hipMalloc(&d_flags_0, size * sizeof(*d_flags_0)));
-        HIP_CHECK(
-            hipMemcpy(d_flags_0, flags_0.data(), size * sizeof(*d_flags_0), hipMemcpyHostToDevice));
+        common::device_ptr<FlagType> d_flags_0(flags_0);
+        common::device_ptr<FlagType> d_flags_1;
+        common::device_ptr<FlagType> d_flags_2;
         if(is_tuning)
         {
-            HIP_CHECK(hipMalloc(&d_flags_1, size * sizeof(*d_flags_1)));
-            HIP_CHECK(hipMemcpy(d_flags_1,
-                                flags_1.data(),
-                                size * sizeof(*d_flags_1),
-                                hipMemcpyHostToDevice));
-            HIP_CHECK(hipMalloc(&d_flags_2, size * sizeof(*d_flags_2)));
-            HIP_CHECK(hipMemcpy(d_flags_2,
-                                flags_2.data(),
-                                size * sizeof(*d_flags_2),
-                                hipMemcpyHostToDevice));
+            d_flags_1.store(flags_1);
+            d_flags_2.store(flags_2);
         }
 
-        DataType* d_output{};
-        HIP_CHECK(hipMalloc(&d_output, size * sizeof(*d_output)));
+        common::device_ptr<DataType> d_output(size);
 
-        unsigned int* d_selected_count_output{};
-        HIP_CHECK(hipMalloc(&d_selected_count_output, sizeof(*d_selected_count_output)));
+        common::device_ptr<unsigned int> d_selected_count_output(1);
 
         const auto dispatch = [&](void* d_temp_storage, size_t& temp_storage_size_bytes)
         {
@@ -417,70 +325,31 @@ struct device_select_predicated_flag_benchmark : public config_autotune_interfac
                 auto predicate = [](const FlagType& value) -> bool { return value; };
                 HIP_CHECK(rocprim::select<Config>(d_temp_storage,
                                                   temp_storage_size_bytes,
-                                                  d_input,
+                                                  d_input.get(),
                                                   d_flags,
-                                                  d_output,
-                                                  d_selected_count_output,
+                                                  d_output.get(),
+                                                  d_selected_count_output.get(),
                                                   size,
                                                   predicate,
                                                   stream));
             };
 
-            dispatch_predicated_flags(d_flags_0);
+            dispatch_predicated_flags(d_flags_0.get());
             if(is_tuning)
             {
-                dispatch_predicated_flags(d_flags_1);
-                dispatch_predicated_flags(d_flags_2);
+                dispatch_predicated_flags(d_flags_1.get());
+                dispatch_predicated_flags(d_flags_2.get());
             }
         };
 
         // Allocate temporary storage memory
         size_t temp_storage_size_bytes{};
         dispatch(nullptr, temp_storage_size_bytes);
-        void* d_temp_storage{};
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-        for(int i = 0; i < warmup_iter; i++)
-        {
-            dispatch(d_temp_storage, temp_storage_size_bytes);
-        }
-        HIP_CHECK(hipDeviceSynchronize());
+        state.run([&] { dispatch(d_temp_storage.get(), temp_storage_size_bytes); });
 
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            HIP_CHECK(hipEventRecord(start, stream));
-            for(int i = 0; i < batch_size; ++i)
-            {
-                dispatch(d_temp_storage, temp_storage_size_bytes);
-            }
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds{};
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(DataType));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        HIP_CHECK(hipFree(d_input));
-        if(is_tuning)
-        {
-            HIP_CHECK(hipFree(d_flags_2));
-            HIP_CHECK(hipFree(d_flags_1));
-        }
-        HIP_CHECK(hipFree(d_flags_0));
-        HIP_CHECK(hipFree(d_output));
-        HIP_CHECK(hipFree(d_selected_count_output));
-        HIP_CHECK(hipFree(d_temp_storage));
+        state.set_throughput(size, sizeof(DataType));
     }
 
     static constexpr bool is_tuning = Probability == select_probability::tuning;
@@ -497,7 +366,7 @@ inline std::vector<DataType> get_unique_input(size_t size, float probability, un
     auto                  input01 = get_random_data01<DataType>(size, probability, seed);
     auto                  acc     = input01[0];
     input[0]                      = acc;
-    for(size_t i = 1; i < input01.size(); i++)
+    for(size_t i = 1; i < input01.size(); ++i)
     {
         input[i] = op(acc, input01[i]);
     }
@@ -505,10 +374,10 @@ inline std::vector<DataType> get_unique_input(size_t size, float probability, un
     return input;
 }
 
-template<class DataType,
-         class Config                   = rocprim::default_config,
+template<typename DataType,
+         typename Config                = rocprim::default_config,
          select_probability Probability = select_probability::tuning>
-struct device_select_unique_benchmark : public config_autotune_interface
+struct device_select_unique_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -519,12 +388,13 @@ struct device_select_unique_benchmark : public config_autotune_interface
                                          + ",cfg:" + partition_config_name<Config>() + "}");
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
-        // Calculate the number of elements 
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
+        // Calculate the number of elements
         size_t size = bytes / sizeof(DataType);
 
         std::vector<DataType> input_0;
@@ -542,31 +412,18 @@ struct device_select_unique_benchmark : public config_autotune_interface
             input_0 = get_unique_input<DataType>(size, get_probability(Probability), seed.get_0());
         }
 
-        DataType* d_input_0{};
-        DataType* d_input_1{};
-        DataType* d_input_2{};
-        HIP_CHECK(hipMalloc(&d_input_0, size * sizeof(*d_input_0)));
-        HIP_CHECK(
-            hipMemcpy(d_input_0, input_0.data(), size * sizeof(*d_input_0), hipMemcpyHostToDevice));
+        common::device_ptr<DataType> d_input_0(input_0);
+        common::device_ptr<DataType> d_input_1;
+        common::device_ptr<DataType> d_input_2;
         if(is_tuning)
         {
-            HIP_CHECK(hipMalloc(&d_input_1, size * sizeof(*d_input_1)));
-            HIP_CHECK(hipMemcpy(d_input_1,
-                                input_1.data(),
-                                size * sizeof(*d_input_1),
-                                hipMemcpyHostToDevice));
-            HIP_CHECK(hipMalloc(&d_input_2, size * sizeof(*d_input_2)));
-            HIP_CHECK(hipMemcpy(d_input_2,
-                                input_2.data(),
-                                size * sizeof(*d_input_2),
-                                hipMemcpyHostToDevice));
+            d_input_1.store(input_1);
+            d_input_2.store(input_2);
         }
 
-        DataType* d_output{};
-        HIP_CHECK(hipMalloc(&d_output, size * sizeof(*d_output)));
+        common::device_ptr<DataType> d_output(size);
 
-        unsigned int* d_selected_count_output{};
-        HIP_CHECK(hipMalloc(&d_selected_count_output, sizeof(*d_selected_count_output)));
+        common::device_ptr<unsigned int> d_selected_count_output(1);
 
         const auto dispatch = [&](void* d_temp_storage, size_t& temp_storage_size_bytes)
         {
@@ -575,77 +432,39 @@ struct device_select_unique_benchmark : public config_autotune_interface
                 HIP_CHECK(rocprim::unique<Config>(d_temp_storage,
                                                   temp_storage_size_bytes,
                                                   d_input,
-                                                  d_output,
-                                                  d_selected_count_output,
+                                                  d_output.get(),
+                                                  d_selected_count_output.get(),
                                                   size,
                                                   rocprim::equal_to<DataType>(),
                                                   stream));
             };
 
-            dispatch_flags(d_input_0);
+            dispatch_flags(d_input_0.get());
             if(is_tuning)
             {
-                dispatch_flags(d_input_1);
-                dispatch_flags(d_input_2);
+                dispatch_flags(d_input_1.get());
+                dispatch_flags(d_input_2.get());
             }
         };
 
         // Allocate temporary storage memory
         size_t temp_storage_size_bytes{};
         dispatch(nullptr, temp_storage_size_bytes);
-        void* d_temp_storage{};
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-        for(int i = 0; i < warmup_iter; ++i)
-        {
-            dispatch(d_temp_storage, temp_storage_size_bytes);
-        }
-        HIP_CHECK(hipDeviceSynchronize());
+        state.run([&] { dispatch(d_temp_storage.get(), temp_storage_size_bytes); });
 
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            HIP_CHECK(hipEventRecord(start, stream));
-            for(int i = 0; i < batch_size; ++i)
-            {
-                dispatch(d_temp_storage, temp_storage_size_bytes);
-            }
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds{};
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(DataType));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        if(is_tuning)
-        {
-            HIP_CHECK(hipFree(d_input_2));
-            HIP_CHECK(hipFree(d_input_1));
-        }
-        HIP_CHECK(hipFree(d_input_0));
-        HIP_CHECK(hipFree(d_output));
-        HIP_CHECK(hipFree(d_selected_count_output));
-        HIP_CHECK(hipFree(d_temp_storage));
+        state.set_throughput(size, sizeof(DataType));
     }
 
     static constexpr bool is_tuning = Probability == select_probability::tuning;
 };
 
-template<class KeyType,
-         class ValueType,
-         class Config                   = rocprim::default_config,
+template<typename KeyType,
+         typename ValueType,
+         typename Config                = rocprim::default_config,
          select_probability Probability = select_probability::tuning>
-struct device_select_unique_by_key_benchmark : public config_autotune_interface
+struct device_select_unique_by_key_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -657,12 +476,13 @@ struct device_select_unique_by_key_benchmark : public config_autotune_interface
                                          + ",cfg:" + partition_config_name<Config>() + "}");
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
-        // Calculate the number of elements 
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
+        // Calculate the number of elements
         size_t size = bytes / sizeof(KeyType);
 
         std::vector<KeyType> input_keys_0;
@@ -688,43 +508,22 @@ struct device_select_unique_by_key_benchmark : public config_autotune_interface
                                                              random_range.second,
                                                              seed.get_1());
 
-        KeyType* d_keys_input_0{};
-        KeyType* d_keys_input_1{};
-        KeyType* d_keys_input_2{};
-        HIP_CHECK(hipMalloc(&d_keys_input_0, size * sizeof(*d_keys_input_0)));
-        HIP_CHECK(hipMemcpy(d_keys_input_0,
-                            input_keys_0.data(),
-                            size * sizeof(*d_keys_input_0),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<KeyType> d_keys_input_0(input_keys_0);
+        common::device_ptr<KeyType> d_keys_input_1;
+        common::device_ptr<KeyType> d_keys_input_2;
         if(is_tuning)
         {
-            HIP_CHECK(hipMalloc(&d_keys_input_1, size * sizeof(*d_keys_input_1)));
-            HIP_CHECK(hipMemcpy(d_keys_input_1,
-                                input_keys_1.data(),
-                                size * sizeof(*d_keys_input_1),
-                                hipMemcpyHostToDevice));
-            HIP_CHECK(hipMalloc(&d_keys_input_2, size * sizeof(*d_keys_input_2)));
-            HIP_CHECK(hipMemcpy(d_keys_input_2,
-                                input_keys_2.data(),
-                                size * sizeof(*d_keys_input_2),
-                                hipMemcpyHostToDevice));
+            d_keys_input_1.store(input_keys_1);
+            d_keys_input_2.store(input_keys_2);
         }
 
-        ValueType* d_values_input{};
-        HIP_CHECK(hipMalloc(&d_values_input, size * sizeof(*d_values_input)));
-        HIP_CHECK(hipMemcpy(d_values_input,
-                            input_values.data(),
-                            size * sizeof(*d_values_input),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<ValueType> d_values_input(input_values);
 
-        KeyType* d_keys_output{};
-        HIP_CHECK(hipMalloc(&d_keys_output, size * sizeof(*d_keys_output)));
+        common::device_ptr<KeyType> d_keys_output(size);
 
-        ValueType* d_values_output{};
-        HIP_CHECK(hipMalloc(&d_values_output, size * sizeof(*d_values_output)));
+        common::device_ptr<ValueType> d_values_output(size);
 
-        unsigned int* d_selected_count_output{};
-        HIP_CHECK(hipMalloc(&d_selected_count_output, sizeof(*d_selected_count_output)));
+        common::device_ptr<unsigned int> d_selected_count_output(1);
 
         const auto dispatch = [&](void* d_temp_storage, size_t& temp_storage_size_bytes)
         {
@@ -733,72 +532,31 @@ struct device_select_unique_by_key_benchmark : public config_autotune_interface
                 HIP_CHECK(rocprim::unique_by_key<Config>(d_temp_storage,
                                                          temp_storage_size_bytes,
                                                          d_keys_input,
-                                                         d_values_input,
-                                                         d_keys_output,
-                                                         d_values_output,
-                                                         d_selected_count_output,
+                                                         d_values_input.get(),
+                                                         d_keys_output.get(),
+                                                         d_values_output.get(),
+                                                         d_selected_count_output.get(),
                                                          size,
                                                          rocprim::equal_to<KeyType>(),
                                                          stream));
             };
 
-            dispatch_flags(d_keys_input_0);
+            dispatch_flags(d_keys_input_0.get());
             if(is_tuning)
             {
-                dispatch_flags(d_keys_input_1);
-                dispatch_flags(d_keys_input_2);
+                dispatch_flags(d_keys_input_1.get());
+                dispatch_flags(d_keys_input_2.get());
             }
         };
 
         // Allocate temporary storage memory
         size_t temp_storage_size_bytes{};
         dispatch(nullptr, temp_storage_size_bytes);
-        void* d_temp_storage{};
-        HIP_CHECK(hipMalloc(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-        for(int i = 0; i < warmup_iter; ++i)
-        {
-            dispatch(d_temp_storage, temp_storage_size_bytes);
-        }
-        HIP_CHECK(hipDeviceSynchronize());
+        state.run([&] { dispatch(d_temp_storage.get(), temp_storage_size_bytes); });
 
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            HIP_CHECK(hipEventRecord(start, stream));
-            for(int i = 0; i < batch_size; ++i)
-            {
-                dispatch(d_temp_storage, temp_storage_size_bytes);
-            }
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds{};
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size
-                                * (sizeof(KeyType) + sizeof(ValueType)));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        if(is_tuning)
-        {
-            HIP_CHECK(hipFree(d_keys_input_2));
-            HIP_CHECK(hipFree(d_keys_input_1));
-        }
-        HIP_CHECK(hipFree(d_keys_input_0));
-        HIP_CHECK(hipFree(d_values_input));
-        HIP_CHECK(hipFree(d_keys_output));
-        HIP_CHECK(hipFree(d_values_output));
-        HIP_CHECK(hipFree(d_selected_count_output));
-        HIP_CHECK(hipFree(d_temp_storage));
+        state.set_throughput(size, sizeof(KeyType) + sizeof(ValueType));
     }
 
     static constexpr bool is_tuning = Probability == select_probability::tuning;
@@ -816,7 +574,7 @@ struct create_benchmark
     static constexpr unsigned int max_items_per_thread
         = max_shared_memory / (block_size * max_size_per_element);
 
-    void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
+    void operator()(std::vector<std::unique_ptr<benchmark_utils::autotune_interface>>& storage)
     {
         storage.emplace_back(
             std::make_unique<device_select_unique_by_key_benchmark<KeyType, ValueType, Config>>());
@@ -833,7 +591,7 @@ struct create_benchmark
 template<typename Config, typename KeyType>
 struct create_benchmark<Config, KeyType, rocprim::empty_type>
 {
-    void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
+    void operator()(std::vector<std::unique_ptr<benchmark_utils::autotune_interface>>& storage)
     {
         storage.emplace_back(std::make_unique<device_select_flag_benchmark<KeyType, Config>>());
         storage.emplace_back(
@@ -848,14 +606,14 @@ struct device_select_benchmark_generator
     template<int ItemsPerThread>
     struct create_ipt
     {
-        void operator()(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
+        void operator()(std::vector<std::unique_ptr<benchmark_utils::autotune_interface>>& storage)
         {
             using config = rocprim::select_config<BlockSize, ItemsPerThread>;
             create_benchmark<config, KeyType, ValueType>{}(storage);
         }
     };
 
-    static void create(std::vector<std::unique_ptr<config_autotune_interface>>& storage)
+    static void create(std::vector<std::unique_ptr<benchmark_utils::autotune_interface>>& storage)
     {
         static constexpr int max_items_per_thread
             = std::min(64 / std::max(sizeof(KeyType), sizeof(ValueType)), size_t{32});

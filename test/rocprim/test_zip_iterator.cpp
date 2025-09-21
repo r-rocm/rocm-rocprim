@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,15 +22,26 @@
 
 #include "../common_test_header.hpp"
 
+#include "../../common/utils_device_ptr.hpp"
+
+// required test headers
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+
 // required rocprim headers
 #include <rocprim/device/device_reduce.hpp>
 #include <rocprim/device/device_transform.hpp>
 #include <rocprim/iterator/counting_iterator.hpp>
-#include <rocprim/iterator/zip_iterator.hpp>
 #include <rocprim/iterator/transform_iterator.hpp>
+#include <rocprim/iterator/zip_iterator.hpp>
+#include <rocprim/types/tuple.hpp>
 
-// required test headers
-#include "test_utils_types.hpp"
+#include <algorithm>
+#include <cstddef>
+#include <numeric>
+#include <type_traits>
+#include <vector>
 
 TEST(RocprimZipIteratorTests, Traits)
 {
@@ -134,7 +145,10 @@ TEST(RocprimZipIteratorTests, Basics)
     ASSERT_EQ((zit2[0]), rocprim::make_tuple(1, 6, 1.0));
     ASSERT_EQ((zit2[2]), rocprim::make_tuple(3, 8, 3.0));
     // +
-    ASSERT_EQ(*(zit2+3), rocprim::make_tuple(4, 9, 4.0));
+    ASSERT_EQ(*(zit2 + 3), rocprim::make_tuple(4, 9, 4.0));
+    ASSERT_EQ(*(3 + zit2), rocprim::make_tuple(4, 9, 4.0));
+    // -
+    ASSERT_EQ(*(zit - 1), rocprim::make_tuple(1, 6, 1));
 }
 
 template<class T1, class T2, class T3>
@@ -163,46 +177,22 @@ TEST(RocprimZipIteratorTests, Transform)
     // using default stream
     hipStream_t stream = 0;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T1> input1 = test_utils::get_random_data<T1>(size, 1, 100, seed_value);
-        std::vector<T2> input2 = test_utils::get_random_data<T2>(size, 1, 100, seed_value);
-        std::vector<T3> input3 = test_utils::get_random_data<T3>(size, 1, 100, seed_value);
+        std::vector<T1> input1 = test_utils::get_random_data_wrapped<T1>(size, 1, 100, seed_value);
+        std::vector<T2> input2 = test_utils::get_random_data_wrapped<T2>(size, 1, 100, seed_value);
+        std::vector<T3> input3 = test_utils::get_random_data_wrapped<T3>(size, 1, 100, seed_value);
         std::vector<U> output(input1.size());
 
-        T1 * d_input1;
-        T2 * d_input2;
-        T3 * d_input3;
-        U * d_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input1, input1.size() * sizeof(T1)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input2, input2.size() * sizeof(T2)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input3, input3.size() * sizeof(T3)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, output.size() * sizeof(U)));
-        HIP_CHECK(
-            hipMemcpy(
-                d_input1, input1.data(),
-                input1.size() * sizeof(T1),
-                hipMemcpyHostToDevice
-            )
-        );
-        HIP_CHECK(
-            hipMemcpy(
-                d_input2, input2.data(),
-                input2.size() * sizeof(T2),
-                hipMemcpyHostToDevice
-            )
-        );
-        HIP_CHECK(
-            hipMemcpy(
-                d_input3, input3.data(),
-                input3.size() * sizeof(T3),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<T1> d_input1(input1);
+        common::device_ptr<T2> d_input2(input2);
+        common::device_ptr<T3> d_input3(input3);
+        common::device_ptr<U>  d_output(output.size());
+
         HIP_CHECK(hipDeviceSynchronize());
 
         // Calculate expected results on host
@@ -219,31 +209,18 @@ TEST(RocprimZipIteratorTests, Transform)
         );
 
         // Run
-        HIP_CHECK(
-            rocprim::transform(
-                rocprim::make_zip_iterator(
-                    rocprim::make_tuple(
-                        d_input1, d_input2, d_input3
-                    )
-                ),
-                d_output,
-                input1.size(),
-                tuple3_transform_op<T1, T2, T3>(),
-                stream,
-                debug_synchronous
-            )
-        );
+        HIP_CHECK(rocprim::transform(
+            rocprim::make_zip_iterator(
+                rocprim::make_tuple(d_input1.get(), d_input2.get(), d_input3.get())),
+            d_output.get(),
+            input1.size(),
+            tuple3_transform_op<T1, T2, T3>(),
+            stream,
+            debug_synchronous));
         HIP_CHECK(hipDeviceSynchronize());
 
         // Copy output to host
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), d_output,
-                output.size() * sizeof(U),
-                hipMemcpyDeviceToHost
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
+        output = d_output.load();
 
         // Check if output values are as expected
         // precision of tuple3_transform_op<T1, T2, T3> is precision<T1> * 2
@@ -251,11 +228,6 @@ TEST(RocprimZipIteratorTests, Transform)
         test_utils::assert_near(output,
                                 expected,
                                 std::max(test_utils::precision<U>, test_utils::precision<T1> * 2));
-
-        HIP_CHECK(hipFree(d_input1));
-        HIP_CHECK(hipFree(d_input2));
-        HIP_CHECK(hipFree(d_input3));
-        HIP_CHECK(hipFree(d_output));
     }
 
 }
@@ -303,129 +275,51 @@ TEST(RocprimZipIteratorTests, TransformReduce)
     // using default stream
     hipStream_t stream = 0;
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T1> input1 = test_utils::get_random_data<T1>(size, 1, 100, seed_value);
-        std::vector<T2> input2 = test_utils::get_random_data<T2>(size, 1, 50, seed_value);
-        std::vector<T3> input3 = test_utils::get_random_data<T3>(size, 1, 10, seed_value);
+        std::vector<T1> input1 = test_utils::get_random_data_wrapped<T1>(size, 1, 100, seed_value);
+        std::vector<T2> input2 = test_utils::get_random_data_wrapped<T2>(size, 1, 50, seed_value);
+        std::vector<T3> input3 = test_utils::get_random_data_wrapped<T3>(size, 1, 10, seed_value);
         std::vector<U1> output1(1, 0);
         std::vector<U2> output2(1, 0);
 
-        T1* d_input1;
-        T2* d_input2;
-        T3* d_input3;
-        U1* d_output1;
-        U2* d_output2;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input1, input1.size() * sizeof(T1)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input2, input2.size() * sizeof(T2)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input3, input3.size() * sizeof(T3)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_output1, output1.size() * sizeof(U1)));
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_output2, output2.size() * sizeof(U2)));
-
-        // Copy input data to device
-        HIP_CHECK(
-            hipMemcpy(
-                d_input1, input1.data(),
-                input1.size() * sizeof(T1),
-                hipMemcpyHostToDevice
-            )
-        );
-        HIP_CHECK(
-            hipMemcpy(
-                d_input2, input2.data(),
-                input2.size() * sizeof(T2),
-                hipMemcpyHostToDevice
-            )
-        );
-        HIP_CHECK(
-            hipMemcpy(
-                d_input3, input3.data(),
-                input3.size() * sizeof(T3),
-                hipMemcpyHostToDevice
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
+        common::device_ptr<T1> d_input1(input1);
+        common::device_ptr<T2> d_input2(input2);
+        common::device_ptr<T3> d_input3(input3);
+        common::device_ptr<U1> d_output1(output1.size());
+        common::device_ptr<U2> d_output2(output2.size());
 
         // Calculate expected results on host
         U1 expected1 = std::accumulate(input1.begin(), input1.end(), T1(0));
         U2 expected2 = std::accumulate(input2.begin(), input2.end(), T2(0))
             + std::accumulate(input3.begin(), input3.end(), T2(0));
 
-        // temp storage
-        size_t temp_storage_size_bytes;
-        // Get size of d_temp_storage
-        HIP_CHECK(
-            rocprim::reduce(
-                nullptr,
-                temp_storage_size_bytes,
-                rocprim::make_transform_iterator(
+        test_utils::test_kernel_wrapper(
+            [&](void* temp_storage, size_t& storage_bytes)
+            {
+                return rocprim::reduce(
+                    temp_storage,
+                    storage_bytes,
+                    rocprim::make_transform_iterator(
+                        rocprim::make_zip_iterator(
+                            rocprim::make_tuple(d_input1.get(), d_input2.get(), d_input3.get())),
+                        tuple3to2_transform_op<T1, T2, T3>()),
                     rocprim::make_zip_iterator(
-                        rocprim::make_tuple(d_input1, d_input2, d_input3)
-                    ),
-                    tuple3to2_transform_op<T1, T2, T3>()
-                ),
-                rocprim::make_zip_iterator(
-                    rocprim::make_tuple(d_output1, d_output2)
-                ),
-                input1.size(),
-                tuple2_reduce_op<T1, T2>(),
-                stream,
-                debug_synchronous
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
-
-        // temp_storage_size_bytes must be >0
-        ASSERT_GT(temp_storage_size_bytes, 0);
-
-        // allocate temporary storage
-        void * d_temp_storage = nullptr;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
-        HIP_CHECK(hipDeviceSynchronize());
-        ASSERT_NE(d_temp_storage, nullptr);
-
-        // Run
-        HIP_CHECK(
-            rocprim::reduce(
-                d_temp_storage,
-                temp_storage_size_bytes,
-                rocprim::make_transform_iterator(
-                    rocprim::make_zip_iterator(
-                        rocprim::make_tuple(d_input1, d_input2, d_input3)
-                    ),
-                    tuple3to2_transform_op<T1, T2, T3>()
-                ),
-                rocprim::make_zip_iterator(
-                    rocprim::make_tuple(d_output1, d_output2)
-                ),
-                input1.size(),
-                tuple2_reduce_op<T1, T2>(),
-                stream,
-                debug_synchronous
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
+                        rocprim::make_tuple(d_output1.get(), d_output2.get())),
+                    input1.size(),
+                    tuple2_reduce_op<T1, T2>(),
+                    stream,
+                    debug_synchronous);
+            },
+            stream);
 
         // Copy output to host
-        HIP_CHECK(
-            hipMemcpy(
-                output1.data(), d_output1,
-                output1.size() * sizeof(U1),
-                hipMemcpyDeviceToHost
-            )
-        );
-        HIP_CHECK(
-            hipMemcpy(
-                output2.data(), d_output2,
-                output2.size() * sizeof(U2),
-                hipMemcpyDeviceToHost
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
+        output1 = d_output1.load();
+        output2 = d_output2.load();
 
         // Check if output values are as expected
         // precision of tuple3to2_transform_op<T1, T2, T3> is (0, precision<T2>)
@@ -440,13 +334,6 @@ TEST(RocprimZipIteratorTests, TransformReduce)
                                 expected2,
                                 (std::max(test_utils::precision<T2>, test_utils::precision<U2>)
                                  + test_utils::precision<T2>)*size);
-
-        HIP_CHECK(hipFree(d_input1));
-        HIP_CHECK(hipFree(d_input2));
-        HIP_CHECK(hipFree(d_input3));
-        HIP_CHECK(hipFree(d_output1));
-        HIP_CHECK(hipFree(d_output2));
-        HIP_CHECK(hipFree(d_temp_storage));
     }
 
 }

@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -41,11 +41,8 @@ set(CMAKE_HIP_STANDARD 14)
 set(CMAKE_HIP_STANDARD_REQUIRED ON)
 set(CMAKE_HIP_EXTENSIONS OFF)
 
-# Set CXX standard
-if (CMAKE_CXX_STANDARD EQUAL 14)
-  message(WARNING "C++14 will be deprecated in the next major release")
-elseif(NOT CMAKE_CXX_STANDARD EQUAL 17)
-  message(FATAL_ERROR "Only C++14 and C++17 are supported")
+if(NOT CMAKE_CXX_STANDARD EQUAL 17)
+  message(FATAL_ERROR "Only C++17 is supported")
 endif()
 
 if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
@@ -68,12 +65,14 @@ include(CMakeDependentOption)
 # Disables building tests, benchmarks, examples
 option(ONLY_INSTALL "Only install" OFF)
 cmake_dependent_option(BUILD_TEST "Build tests (requires googletest)" OFF "NOT ONLY_INSTALL" OFF)
+option(WITH_ROCRAND "Build tests with device-side data generation(requires rocRAND)" OFF)
 cmake_dependent_option(BUILD_BENCHMARK "Build benchmarks" OFF "NOT ONLY_INSTALL" OFF)
 cmake_dependent_option(BUILD_EXAMPLE "Build examples" OFF "NOT ONLY_INSTALL" OFF)
 option(BUILD_NAIVE_BENCHMARK "Build naive benchmarks" OFF)
 cmake_dependent_option(BUILD_DOCS "Build documentation (requires sphinx)" OFF "NOT ONLY_INSTALL" OFF)
 option(BUILD_CODE_COVERAGE "Build with code coverage enabled" OFF)
 option(ROCPRIM_INSTALL "Enable installation of rocPRIM (projects embedding rocPRIM may want to turn this OFF)" ON)
+option(ROCPRIM_ENABLE_ASSERTS "Enable asserts in release build)" OFF)
 
 check_language(HIP)
 cmake_dependent_option(USE_HIPCXX "Use CMake HIP language support" OFF CMAKE_HIP_COMPILER OFF)
@@ -104,6 +103,21 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "" "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
+if(ROCPRIM_ENABLE_ASSERTS)
+  if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "")
+      string(TOUPPER ${CMAKE_BUILD_TYPE} BUILD_TYPE)
+      set(BUILD_TYPE_CXX_FLAGS "CMAKE_CXX_FLAGS_${BUILD_TYPE}")
+      set(BUILD_TYPE_C_FLAGS "CMAKE_C_FLAGS_${BUILD_TYPE}")
+  endif()
+
+  string(REGEX REPLACE "-DNDEBUG( |$)" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+  string(REGEX REPLACE "-DNDEBUG( |$)" "" CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
+  if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "")
+      string(REGEX REPLACE "-DNDEBUG( |$)" "" ${BUILD_TYPE_CXX_FLAGS} "${${BUILD_TYPE_CXX_FLAGS}}")
+      string(REGEX REPLACE "-DNDEBUG( |$)" "" ${BUILD_TYPE_C_FLAGS} "${${BUILD_TYPE_C_FLAGS}}")
+  endif()
+endif()
+
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE CACHE BOOL "Add paths to linker search and installed rpath")
 
 if(DEFINED BUILD_SHARED_LIBS)
@@ -115,6 +129,7 @@ set(BUILD_SHARED_LIBS OFF) # don't build client dependencies as shared
 
 # Get dependencies (required here to get rocm-cmake)
 include(cmake/Dependencies.cmake)
+
 # Use target ID syntax if supported for GPU_TARGETS
 if(USE_HIPCXX)
   enable_language(HIP)
@@ -130,14 +145,13 @@ else()
     if(BUILD_ADDRESS_SANITIZER)
       # ASAN builds require xnack
       rocm_check_target_ids(DEFAULT_AMDGPU_TARGETS
-        TARGETS "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+"
+        TARGETS "gfx908:xnack+;gfx90a:xnack+;gfx942:xnack+;gfx950:xnack+"
       )
     else()
       rocm_check_target_ids(DEFAULT_AMDGPU_TARGETS
-        TARGETS "gfx803;gfx900:xnack-;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack-;gfx90a:xnack+;gfx942;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
+        TARGETS "gfx803;gfx900:xnack-;gfx906:xnack-;gfx908:xnack-;gfx90a:xnack-;gfx90a:xnack+;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1102;gfx1151;gfx1200;gfx1201"
       )
     endif()
-
     set(GPU_TARGETS "${DEFAULT_AMDGPU_TARGETS}" CACHE STRING "GPU architectures to compile for" FORCE)
   endif()
 endif()
@@ -166,8 +180,9 @@ if(BUILD_CODE_COVERAGE)
 endif()
 
 # Setup VERSION
-set(VERSION_STRING "3.4.1")
+set(VERSION_STRING "4.0.0")
 rocm_setup_version(VERSION ${VERSION_STRING})
+math(EXPR rocprim_VERSION_NUMBER "${rocprim_VERSION_MAJOR} * 100000 + ${rocprim_VERSION_MINOR} * 100 + ${rocprim_VERSION_PATCH}")
 
 # Print configuration summary
 include(cmake/Summary.cmake)
@@ -230,7 +245,7 @@ if (ROCPRIM_PROJECT_IS_TOP_LEVEL)
 
   rocm_create_package(
     NAME rocprim
-    DESCRIPTION "Radeon Open Compute Parallel Primitives Library"
+    DESCRIPTION "rocPRIM is a header-only library that provides HIP parallel primitives." 
     MAINTAINER "rocPRIM Maintainer <rocprim-maintainer@amd.com>"
     HEADER_ONLY
   )

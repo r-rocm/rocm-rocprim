@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,52 +22,69 @@
 
 #include "../common_test_header.hpp"
 
-// required rocprim headers
-#include <rocprim/device/device_segmented_scan.hpp>
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_data_generation.hpp"
+#include "../../common/utils_device_ptr.hpp"
 
 // required test headers
-#include "test_utils_types.hpp"
+#include "identity_iterator.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_custom_test_types.hpp"
+#include "test_utils_data_generation.hpp"
+#include "test_utils_hipgraphs.hpp"
 
-#include <numeric>
+// required rocprim headers
+#include <rocprim/device/device_segmented_scan.hpp>
+#include <rocprim/functional.hpp>
+#include <rocprim/types.hpp>
 
-template<
-    class Input,
-    class Output,
-    class ScanOp = ::rocprim::plus<Input>,
-    int Init = 0, // as only integral types supported, int is used here even for floating point inputs
-    unsigned int MinSegmentLength = 0,
-    unsigned int MaxSegmentLength = 1000,
-    // Tests output iterator with void value_type (OutputIterator concept)
-    // Segmented scan primitives which use head flags do not support this kind
-    // of output iterators.
-    bool UseIdentityIterator = false,
-    bool UseGraphs = false
->
+#include <algorithm>
+#include <cstddef>
+#include <iostream>
+#include <random>
+#include <stdint.h>
+#include <vector>
+
+template<class Input,
+         class Output,
+         class ScanOp = ::rocprim::plus<Input>,
+         int Init
+         = 0, // as only integral types supported, int is used here even for floating point inputs
+         unsigned int MinSegmentLength = 0,
+         unsigned int MaxSegmentLength = 1000,
+         // Tests output iterator with void value_type (OutputIterator concept)
+         // Segmented scan primitives which use head flags do not support this kind
+         // of output iterators.
+         bool UseIdentityIterator = false,
+         bool UseGraphs           = false>
 struct params
 {
-    using input_type = Input;
-    using output_type = Output;
-    using scan_op_type = ScanOp;
-    static constexpr int init = Init;
-    static constexpr unsigned int min_segment_length = MinSegmentLength;
-    static constexpr unsigned int max_segment_length = MaxSegmentLength;
-    static constexpr bool use_identity_iterator = UseIdentityIterator;
-    static constexpr bool use_graphs = UseGraphs;
+    using input_type                                    = Input;
+    using output_type                                   = Output;
+    using scan_op_type                                  = ScanOp;
+    static constexpr int          init                  = Init;
+    static constexpr unsigned int min_segment_length    = MinSegmentLength;
+    static constexpr unsigned int max_segment_length    = MaxSegmentLength;
+    static constexpr bool         use_identity_iterator = UseIdentityIterator;
+    static constexpr bool         use_graphs            = UseGraphs;
 };
 
 template<class Params>
-class RocprimDeviceSegmentedScan : public ::testing::Test {
+class RocprimDeviceSegmentedScan : public ::testing::Test
+{
 public:
     using params = Params;
 };
 
-using custom_short2  = test_utils::custom_test_type<short>;
-using custom_int2    = test_utils::custom_test_type<int>;
-using custom_double2 = test_utils::custom_test_type<double>;
+using custom_short2  = common::custom_type<short, short, true>;
+using custom_int2    = common::custom_type<int, int, true>;
+using custom_double2 = common::custom_type<double, double, true>;
 using half           = rocprim::half;
 using bfloat16       = rocprim::bfloat16;
 
-typedef ::testing::Types<
+using Params = ::testing::Types<
     params<unsigned char, unsigned int, rocprim::plus<unsigned int>>,
     params<int, int, rocprim::plus<int>, -100, 0, 10000>,
     params<int8_t, int8_t, rocprim::plus<int8_t>, -100, 0, 10000>,
@@ -80,8 +97,7 @@ typedef ::testing::Types<
     params<half, float, rocprim::plus<float>, 0, 10, 200, true>,
     params<half, half, rocprim::minimum<half>, 0, 1000, 30000>,
     params<unsigned char, long long, rocprim::plus<int>, 10, 3000, 4000>,
-    params<int, int, ::rocprim::plus<int>, 0, 0, 1000, false, true>>
-    Params;
+    params<int, int, ::rocprim::plus<int>, 0, 0, 1000, false, true>>;
 
 TYPED_TEST_SUITE(RocprimDeviceSegmentedScan, Params);
 
@@ -98,28 +114,28 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScan)
     using offset_type  = unsigned int;
 
     constexpr bool use_identity_iterator = TestFixture::params::use_identity_iterator;
-    const bool debug_synchronous = false;
+    const bool     debug_synchronous     = false;
 
     scan_op_type scan_op;
 
-    std::random_device rd;
+    std::random_device         rd;
     std::default_random_engine gen(rd());
 
-    std::uniform_int_distribution<size_t> segment_length_dis(
+    common::uniform_int_distribution<size_t> segment_length_dis(
         TestFixture::params::min_segment_length,
-        TestFixture::params::max_segment_length
-    );
+        TestFixture::params::max_segment_length);
 
     hipStream_t stream = 0; // default stream
-    if (TestFixture::params::use_graphs)
+    if(TestFixture::params::use_graphs)
     {
         // Default stream does not support hipGraph stream capture, so create one
         HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         for(size_t size : test_utils::get_sizes(seed_value))
@@ -128,18 +144,21 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScan)
 
             // Generate data and calculate expected results
             std::vector<output_type> values_expected(size);
-            std::vector<input_type> values_input = test_utils::get_random_data<input_type>(size, 0, 100, seed_value);
+            std::vector<input_type>  values_input
+                = test_utils::get_random_data_wrapped<input_type>(size, 0, 100, seed_value);
 
             std::vector<offset_type> offsets;
-            unsigned int segments_count = 0;
-            size_t offset = 0;
+            std::vector<size_t>      sizes;
+            unsigned int             segments_count     = 0;
+            size_t                   offset             = 0;
             size_t                   max_segment_length = 0;
             while(offset < size)
             {
                 const size_t segment_length = segment_length_dis(gen);
+                sizes.push_back(segment_length);
                 offsets.push_back(offset);
 
-                const size_t end = std::min(size, offset + segment_length);
+                const size_t end   = std::min(size, offset + segment_length);
                 max_segment_length = std::max(max_segment_length, end - offset);
 
                 input_type aggregate    = values_input[offset];
@@ -172,44 +191,25 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScan)
                 continue;
             }
 
-            input_type  * d_values_input;
-            offset_type * d_offsets;
-            output_type * d_values_output;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_values_input, size * sizeof(input_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_offsets, (segments_count + 1) * sizeof(offset_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_values_output, size * sizeof(output_type)));
-            HIP_CHECK(
-                hipMemcpy(
-                    d_values_input, values_input.data(),
-                    size * sizeof(input_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(
-                hipMemcpy(
-                    d_offsets, offsets.data(),
-                    (segments_count + 1) * sizeof(offset_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<input_type>  d_values_input(values_input);
+            common::device_ptr<offset_type> d_offsets(offsets);
+            common::device_ptr<output_type> d_values_output(size);
 
             size_t temporary_storage_bytes;
             HIP_CHECK(rocprim::segmented_inclusive_scan(
                 nullptr,
                 temporary_storage_bytes,
-                d_values_input,
-                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output),
+                d_values_input.get(),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output.get()),
                 segments_count,
-                d_offsets,
-                d_offsets + 1,
+                d_offsets.get(),
+                d_offsets.get() + 1,
                 scan_op,
                 stream,
                 debug_synchronous));
 
             ASSERT_GT(temporary_storage_bytes, 0);
-            void * d_temporary_storage;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_temporary_storage, temporary_storage_bytes));
+            common::device_ptr<void> d_temporary_storage(temporary_storage_bytes);
 
             test_utils::GraphHelper gHelper;
             if(TestFixture::params::use_graphs)
@@ -217,19 +217,18 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScan)
                 gHelper.startStreamCapture(stream);
             }
 
-            HIP_CHECK(
-                rocprim::segmented_inclusive_scan(
-                    d_temporary_storage, temporary_storage_bytes,
-                    d_values_input,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output),
-                    segments_count,
-                    d_offsets, d_offsets + 1,
-                    scan_op,
-                    stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_inclusive_scan(
+                d_temporary_storage.get(),
+                temporary_storage_bytes,
+                d_values_input.get(),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output.get()),
+                segments_count,
+                d_offsets.get(),
+                d_offsets.get() + 1,
+                scan_op,
+                stream,
+                debug_synchronous));
 
-            
             if(TestFixture::params::use_graphs)
             {
                 gHelper.createAndLaunchGraph(stream, true, false);
@@ -237,27 +236,31 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScan)
 
             HIP_CHECK(hipDeviceSynchronize());
 
-            std::vector<output_type> values_output(size);
-            HIP_CHECK(
-                hipMemcpy(
-                    values_output.data(), d_values_output,
-                    values_output.size() * sizeof(output_type),
-                    hipMemcpyDeviceToHost
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            auto values_output = d_values_output.load();
 
-            ASSERT_NO_FATAL_FAILURE(
-                test_utils::assert_near(values_output, values_expected, precision));
+            if(size > 0)
+            {
+                const float single_op_precision = precision / max_segment_length;
 
-            HIP_CHECK(hipFree(d_temporary_storage));
-            HIP_CHECK(hipFree(d_values_input));
-            HIP_CHECK(hipFree(d_offsets));
-            HIP_CHECK(hipFree(d_values_output));
+                size_t current_offset     = 0;
+                size_t current_size_index = 0;
+                for(size_t i = 0; i < values_output.size(); ++i)
+                {
+                    if((i - current_offset) == sizes[current_size_index])
+                    {
+                        current_offset += sizes[current_size_index];
+                        ++current_size_index;
+                    }
+                    ASSERT_NO_FATAL_FAILURE(
+                        test_utils::assert_near(values_output[i],
+                                                values_expected[i],
+                                                single_op_precision * (i - current_offset)));
+                }
+            }
 
             if(TestFixture::params::use_graphs)
             {
-               gHelper.cleanupGraphHelper();
+                gHelper.cleanupGraphHelper();
             }
         }
     }
@@ -287,24 +290,24 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScan)
 
     scan_op_type scan_op;
 
-    std::random_device rd;
+    std::random_device         rd;
     std::default_random_engine gen(rd());
 
-    std::uniform_int_distribution<size_t> segment_length_dis(
+    common::uniform_int_distribution<size_t> segment_length_dis(
         TestFixture::params::min_segment_length,
-        TestFixture::params::max_segment_length
-    );
+        TestFixture::params::max_segment_length);
 
     hipStream_t stream = 0; // default stream
-    if (TestFixture::params::use_graphs)
+    if(TestFixture::params::use_graphs)
     {
         // Default stream does not support hipGraph stream capture, so create one
         HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         for(size_t size : test_utils::get_sizes(seed_value))
@@ -313,18 +316,21 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScan)
 
             // Generate data and calculate expected results
             std::vector<output_type> values_expected(size);
-            std::vector<input_type> values_input = test_utils::get_random_data<input_type>(size, 0, 100, seed_value);
+            std::vector<input_type>  values_input
+                = test_utils::get_random_data_wrapped<input_type>(size, 0, 100, seed_value);
 
             std::vector<offset_type> offsets;
-            unsigned int segments_count = 0;
-            size_t offset = 0;
+            std::vector<size_t>      sizes;
+            unsigned int             segments_count     = 0;
+            size_t                   offset             = 0;
             size_t                   max_segment_length = 0;
             while(offset < size)
             {
                 const size_t segment_length = segment_length_dis(gen);
+                sizes.push_back(segment_length);
                 offsets.push_back(offset);
 
-                const size_t end = std::min(size, offset + segment_length);
+                const size_t end   = std::min(size, offset + segment_length);
                 max_segment_length = std::max(max_segment_length, end - offset);
 
                 input_type aggregate    = init;
@@ -357,66 +363,47 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScan)
                 continue;
             }
 
-            input_type  * d_values_input;
-            offset_type * d_offsets;
-            output_type * d_values_output;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_values_input, size * sizeof(input_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_offsets, (segments_count + 1) * sizeof(offset_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_values_output, size * sizeof(output_type)));
-            HIP_CHECK(
-                hipMemcpy(
-                    d_values_input, values_input.data(),
-                    size * sizeof(input_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(
-                hipMemcpy(
-                    d_offsets, offsets.data(),
-                    (segments_count + 1) * sizeof(offset_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<input_type>  d_values_input(values_input);
+            common::device_ptr<offset_type> d_offsets(offsets);
+            common::device_ptr<output_type> d_values_output(size);
 
             size_t temporary_storage_bytes;
-            HIP_CHECK(
-                rocprim::segmented_exclusive_scan(
-                    nullptr, temporary_storage_bytes,
-                    d_values_input,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output),
-                    segments_count,
-                    d_offsets, d_offsets + 1,
-                    init, scan_op,
-                    stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_exclusive_scan(
+                nullptr,
+                temporary_storage_bytes,
+                d_values_input.get(),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output.get()),
+                segments_count,
+                d_offsets.get(),
+                d_offsets.get() + 1,
+                init,
+                scan_op,
+                stream,
+                debug_synchronous));
 
             HIP_CHECK(hipDeviceSynchronize());
 
             ASSERT_GT(temporary_storage_bytes, 0);
-            void * d_temporary_storage;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_temporary_storage, temporary_storage_bytes));
-
-            test_utils::GraphHelper gHelper;
+            common::device_ptr<void>     d_temporary_storage(temporary_storage_bytes);
+            test_utils::GraphHelper      gHelper;
             if(TestFixture::params::use_graphs)
             {
                 gHelper.startStreamCapture(stream);
             }
 
-            HIP_CHECK(
-                rocprim::segmented_exclusive_scan(
-                    d_temporary_storage, temporary_storage_bytes,
-                    d_values_input,
-                    test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output),
-                    segments_count,
-                    d_offsets, d_offsets + 1,
-                    init, scan_op,
-                    stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_exclusive_scan(
+                d_temporary_storage.get(),
+                temporary_storage_bytes,
+                d_values_input.get(),
+                test_utils::wrap_in_identity_iterator<use_identity_iterator>(d_values_output.get()),
+                segments_count,
+                d_offsets.get(),
+                d_offsets.get() + 1,
+                init,
+                scan_op,
+                stream,
+                debug_synchronous));
 
-            
             if(TestFixture::params::use_graphs)
             {
                 gHelper.createAndLaunchGraph(stream, true, false);
@@ -424,27 +411,31 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScan)
 
             HIP_CHECK(hipDeviceSynchronize());
 
-            std::vector<output_type> values_output(size);
-            HIP_CHECK(
-                hipMemcpy(
-                    values_output.data(), d_values_output,
-                    values_output.size() * sizeof(output_type),
-                    hipMemcpyDeviceToHost
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            auto values_output = d_values_output.load();
 
-            ASSERT_NO_FATAL_FAILURE(
-                test_utils::assert_near(values_output, values_expected, precision));
+            if(size > 0)
+            {
+                const float single_op_precision = precision / max_segment_length;
 
-            HIP_CHECK(hipFree(d_temporary_storage));
-            HIP_CHECK(hipFree(d_values_input));
-            HIP_CHECK(hipFree(d_offsets));
-            HIP_CHECK(hipFree(d_values_output));
+                size_t current_offset     = 0;
+                size_t current_size_index = 0;
+                for(size_t i = 0; i < values_output.size(); ++i)
+                {
+                    if((i - current_offset) == sizes[current_size_index])
+                    {
+                        current_offset += sizes[current_size_index];
+                        ++current_size_index;
+                    }
+                    ASSERT_NO_FATAL_FAILURE(
+                        test_utils::assert_near(values_output[i],
+                                                values_expected[i],
+                                                single_op_precision * (i - current_offset)));
+                }
+            }
 
             if(TestFixture::params::use_graphs)
             {
-               gHelper.cleanupGraphHelper();
+                gHelper.cleanupGraphHelper();
             }
         }
     }
@@ -474,15 +465,16 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
     scan_op_type scan_op;
 
     hipStream_t stream = 0; // default stream
-    if (TestFixture::params::use_graphs)
+    if(TestFixture::params::use_graphs)
     {
         // Default stream does not support hipGraph stream capture, so create one
         HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         for(auto size : test_utils::get_sizes(seed_value))
@@ -490,8 +482,10 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
             SCOPED_TRACE(testing::Message() << "with size = " << size);
 
             // Generate data
-            std::vector<input_type> input = test_utils::get_random_data<input_type>(size, 1, 10, seed_value);
-            std::vector<flag_type> flags = test_utils::get_random_data<flag_type>(size, 0, 10, seed_value);
+            std::vector<input_type> input
+                = test_utils::get_random_data_wrapped<input_type>(size, 1, 10, seed_value);
+            std::vector<flag_type> flags
+                = test_utils::get_random_data_wrapped<flag_type>(size, 0, 10, seed_value);
 
             if(size != 0)
                 flags[0] = 1U;
@@ -534,27 +528,9 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
                 continue;
             }
 
-            input_type * d_input;
-            flag_type * d_flags;
-            output_type * d_output;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_input, input.size() * sizeof(input_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_flags, flags.size() * sizeof(flag_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, input.size() * sizeof(output_type)));
-            HIP_CHECK(
-                hipMemcpy(
-                    d_input, input.data(),
-                    input.size() * sizeof(input_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(
-                hipMemcpy(
-                    d_flags, flags.data(),
-                    flags.size() * sizeof(flag_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<input_type>  d_input(input);
+            common::device_ptr<flag_type>   d_flags(flags);
+            common::device_ptr<output_type> d_output(input.size());
 
             // Calculate expected results on host
             std::vector<output_type> expected(input.size());
@@ -568,14 +544,15 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
             // temp storage
             size_t temp_storage_size_bytes;
             // Get size of d_temp_storage
-            HIP_CHECK(
-                rocprim::segmented_inclusive_scan(
-                    nullptr, temp_storage_size_bytes,
-                    d_input, d_output, d_flags,
-                    input.size(), scan_op, stream,
-                    debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_inclusive_scan(nullptr,
+                                                        temp_storage_size_bytes,
+                                                        d_input.get(),
+                                                        d_output.get(),
+                                                        d_flags.get(),
+                                                        input.size(),
+                                                        scan_op,
+                                                        stream,
+                                                        debug_synchronous));
 
             HIP_CHECK(hipDeviceSynchronize());
 
@@ -583,9 +560,7 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
             ASSERT_GT(temp_storage_size_bytes, 0);
 
             // allocate temporary storage
-            void * d_temp_storage = nullptr;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
             test_utils::GraphHelper gHelper;
             if(TestFixture::params::use_graphs)
@@ -594,16 +569,16 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
             }
 
             // Run
-            HIP_CHECK(
-                rocprim::segmented_inclusive_scan(
-                    d_temp_storage, temp_storage_size_bytes,
-                    d_input, d_output, d_flags,
-                    input.size(), scan_op, stream,
-                    debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_inclusive_scan(d_temp_storage.get(),
+                                                        temp_storage_size_bytes,
+                                                        d_input.get(),
+                                                        d_output.get(),
+                                                        d_flags.get(),
+                                                        input.size(),
+                                                        scan_op,
+                                                        stream,
+                                                        debug_synchronous));
 
-            
             if(TestFixture::params::use_graphs)
             {
                 gHelper.createAndLaunchGraph(stream, true, false);
@@ -612,26 +587,21 @@ TYPED_TEST(RocprimDeviceSegmentedScan, InclusiveScanUsingHeadFlags)
             HIP_CHECK(hipDeviceSynchronize());
 
             // Check if output values are as expected
-            std::vector<output_type> output(input.size());
-            HIP_CHECK(
-                hipMemcpy(
-                    output.data(), d_output,
-                    output.size() * sizeof(output_type),
-                    hipMemcpyDeviceToHost
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            auto output = d_output.load();
 
-            ASSERT_NO_FATAL_FAILURE(test_utils::assert_near(output, expected, precision));
-
-            HIP_CHECK(hipFree(d_temp_storage));
-            HIP_CHECK(hipFree(d_input));
-            HIP_CHECK(hipFree(d_flags));
-            HIP_CHECK(hipFree(d_output));
+            if(size > 0)
+            {
+                const float single_op_precision = precision / max_segment_length;
+                for(size_t i = 0; i < output.size(); ++i)
+                {
+                    ASSERT_NO_FATAL_FAILURE(
+                        test_utils::assert_near(output[i], expected[i], single_op_precision * i));
+                }
+            }
 
             if(TestFixture::params::use_graphs)
             {
-               gHelper.cleanupGraphHelper();
+                gHelper.cleanupGraphHelper();
             }
         }
     }
@@ -663,15 +633,16 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
     scan_op_type scan_op;
 
     hipStream_t stream = 0; // default stream
-    if (TestFixture::params::use_graphs)
+    if(TestFixture::params::use_graphs)
     {
         // Default stream does not support hipGraph stream capture, so create one
         HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
-        unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         for(auto size : test_utils::get_sizes(seed_value))
@@ -679,8 +650,10 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
             SCOPED_TRACE(testing::Message() << "with size = " << size);
 
             // Generate data
-            std::vector<input_type> input = test_utils::get_random_data<input_type>(size, 1, 10, seed_value);
-            std::vector<flag_type> flags = test_utils::get_random_data<flag_type>(size, 0, 10, seed_value);
+            std::vector<input_type> input
+                = test_utils::get_random_data_wrapped<input_type>(size, 1, 10, seed_value);
+            std::vector<flag_type> flags
+                = test_utils::get_random_data_wrapped<flag_type>(size, 0, 10, seed_value);
 
             if(size != 0)
                 flags[0] = 1U;
@@ -723,27 +696,9 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
                 continue;
             }
 
-            input_type * d_input;
-            flag_type * d_flags;
-            output_type * d_output;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_input, input.size() * sizeof(input_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_flags, flags.size() * sizeof(flag_type)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, input.size() * sizeof(output_type)));
-            HIP_CHECK(
-                hipMemcpy(
-                    d_input, input.data(),
-                    input.size() * sizeof(input_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(
-                hipMemcpy(
-                    d_flags, flags.data(),
-                    flags.size() * sizeof(flag_type),
-                    hipMemcpyHostToDevice
-                )
-            );
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<input_type>  d_input(input);
+            common::device_ptr<flag_type>   d_flags(flags);
+            common::device_ptr<output_type> d_output(input.size());
 
             // Calculate expected results on host
             std::vector<output_type> expected(input.size());
@@ -758,13 +713,16 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
             // temp storage
             size_t temp_storage_size_bytes;
             // Get size of d_temp_storage
-            HIP_CHECK(
-                rocprim::segmented_exclusive_scan(
-                    nullptr, temp_storage_size_bytes,
-                    d_input, d_output, d_flags, init,
-                    input.size(), scan_op, stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_exclusive_scan(nullptr,
+                                                        temp_storage_size_bytes,
+                                                        d_input.get(),
+                                                        d_output.get(),
+                                                        d_flags.get(),
+                                                        init,
+                                                        input.size(),
+                                                        scan_op,
+                                                        stream,
+                                                        debug_synchronous));
 
             HIP_CHECK(hipDeviceSynchronize());
 
@@ -772,9 +730,7 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
             ASSERT_GT(temp_storage_size_bytes, 0);
 
             // allocate temporary storage
-            void * d_temp_storage = nullptr;
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
-            HIP_CHECK(hipDeviceSynchronize());
+            common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
             test_utils::GraphHelper gHelper;
             if(TestFixture::params::use_graphs)
@@ -783,15 +739,17 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
             }
 
             // Run
-            HIP_CHECK(
-                rocprim::segmented_exclusive_scan(
-                    d_temp_storage, temp_storage_size_bytes,
-                    d_input, d_output, d_flags, init,
-                    input.size(), scan_op, stream, debug_synchronous
-                )
-            );
+            HIP_CHECK(rocprim::segmented_exclusive_scan(d_temp_storage.get(),
+                                                        temp_storage_size_bytes,
+                                                        d_input.get(),
+                                                        d_output.get(),
+                                                        d_flags.get(),
+                                                        init,
+                                                        input.size(),
+                                                        scan_op,
+                                                        stream,
+                                                        debug_synchronous));
 
-            
             if(TestFixture::params::use_graphs)
             {
                 gHelper.createAndLaunchGraph(stream, true, false);
@@ -800,28 +758,24 @@ TYPED_TEST(RocprimDeviceSegmentedScan, ExclusiveScanUsingHeadFlags)
             HIP_CHECK(hipDeviceSynchronize());
 
             // Check if output values are as expected
-            std::vector<output_type> output(input.size());
-            HIP_CHECK(
-                hipMemcpy(
-                    output.data(), d_output,
-                    output.size() * sizeof(output_type),
-                    hipMemcpyDeviceToHost
-                )
-            );
+            auto output = d_output.load();
 
             if(TestFixture::params::use_graphs)
             {
-               gHelper.cleanupGraphHelper();
+                gHelper.cleanupGraphHelper();
             }
 
             HIP_CHECK(hipDeviceSynchronize());
 
-            ASSERT_NO_FATAL_FAILURE(test_utils::assert_near(output, expected, precision));
-
-            HIP_CHECK(hipFree(d_temp_storage));
-            HIP_CHECK(hipFree(d_input));
-            HIP_CHECK(hipFree(d_flags));
-            HIP_CHECK(hipFree(d_output));
+            if(size > 0)
+            {
+                const float single_op_precision = precision / max_segment_length;
+                for(size_t i = 0; i < output.size(); ++i)
+                {
+                    ASSERT_NO_FATAL_FAILURE(
+                        test_utils::assert_near(output[i], expected[i], single_op_precision * i));
+                }
+            }
         }
     }
 

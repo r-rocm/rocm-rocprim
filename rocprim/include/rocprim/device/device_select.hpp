@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -58,27 +58,30 @@ namespace detail
 /// * Range specified by \p selected_count_output must have at least 1 element.
 /// * Values of \p flag range should be implicitly convertible to `bool` type.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam FlagIterator - random-access iterator type of the flag range. It can be
+/// \tparam FlagIterator random-access iterator type of the flag range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [in] flags - iterator to the selection flag corresponding to the first element from \p input range.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of element in the input range.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [in] flags iterator to the selection flag corresponding to the first element from \p input range.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of element in the input range.
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -125,7 +128,8 @@ template<
     class InputIterator,
     class FlagIterator,
     class OutputIterator,
-    class SelectedCountOutputIterator
+    class SelectedCountOutputIterator,
+    bool UsingOrderedBlockId = false
 >
 inline
 hipError_t select(void * temporary_storage,
@@ -151,20 +155,22 @@ hipError_t select(void * temporary_storage,
     using output_value_iterator_tuple = tuple<::rocprim::empty_type*, ::rocprim::empty_type*>;
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
-    return detail::partition_impl<detail::partition_subalgo::select_flag, Config, offset_type>(
-        temporary_storage,
-        storage_size,
-        input,
-        no_values,
-        flags,
-        output_tuple,
-        no_output_values,
-        selected_count_output,
-        size,
-        inequality_op_type(),
-        stream,
-        debug_synchronous,
-        unary_predicate_type());
+    return detail::partition_impl<detail::partition_subalgo::select_flag,
+                                 UsingOrderedBlockId,
+                                 Config,
+                                 offset_type>(temporary_storage,
+                                              storage_size,
+                                              input,
+                                              no_values,
+                                              flags,
+                                              output_tuple,
+                                              no_output_values,
+                                              selected_count_output,
+                                              size,
+                                              inequality_op_type(),
+                                              stream,
+                                              debug_synchronous,
+                                              unary_predicate_type());
 }
 
 /// \brief Parallel select primitive for device level using selection operator.
@@ -181,24 +187,27 @@ hipError_t select(void * temporary_storage,
 /// values can be copied into it.
 /// * Range specified by \p selected_count_output must have at least 1 element.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
-/// \tparam UnaryPredicate - type of a unary selection predicate.
+/// \tparam UnaryPredicate type of a unary selection predicate.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of element in the input range.
-/// \param [in] predicate - unary function object that will be used for selecting values.
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of element in the input range.
+/// \param [in] predicate unary function object that will be used for selecting values.
 /// The predicate must meet the C++ named requirement \p BinaryPredicate :
 ///   - The result of applying the predicate must be convertible to bool
 ///   - The predicate must accept const object arguments, with the same behavior regardless of
@@ -206,8 +215,8 @@ hipError_t select(void * temporary_storage,
 /// In practice, the signature of the function should be equivalent to the following:
 /// <tt>bool f(const T &a);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but the function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -257,8 +266,8 @@ template<
     class InputIterator,
     class OutputIterator,
     class SelectedCountOutputIterator,
-    class UnaryPredicate
->
+    class UnaryPredicate,
+    bool UsingOrderedBlockId = false>
 inline
 hipError_t select(void * temporary_storage,
                   size_t& storage_size,
@@ -284,20 +293,22 @@ hipError_t select(void * temporary_storage,
     using output_value_iterator_tuple = tuple<::rocprim::empty_type*, ::rocprim::empty_type*>;
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
-    return detail::partition_impl<detail::partition_subalgo::select_predicate, Config, offset_type>(
-        temporary_storage,
-        storage_size,
-        input,
-        no_values,
-        flags,
-        output_tuple,
-        no_output_values,
-        selected_count_output,
-        size,
-        inequality_op_type(),
-        stream,
-        debug_synchronous,
-        predicate);
+    return detail::partition_impl<detail::partition_subalgo::select_predicate,
+                                  UsingOrderedBlockId,
+                                  Config,
+                                  offset_type>(temporary_storage,
+                                               storage_size,
+                                               input,
+                                               no_values,
+                                               flags,
+                                               output_tuple,
+                                               no_output_values,
+                                               selected_count_output,
+                                               size,
+                                               inequality_op_type(),
+                                               stream,
+                                               debug_synchronous,
+                                               predicate);
 }
 
 /// \brief Parallel select primitive for device level using a range of pre-selected flags.
@@ -316,27 +327,30 @@ hipError_t select(void * temporary_storage,
 /// values can be copied into it.
 /// * Range specified by \p selected_count_output must have at least 1 element.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam FlagIterator - random-access iterator type of the flag range. It can be
+/// \tparam FlagIterator random-access iterator type of the flag range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
-/// \tparam UnaryPredicate - type of a unary selection predicate.
+/// \tparam UnaryPredicate type of a unary selection predicate.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [in] flags - iterator to the selection flag corresponding to the first element from \p input range.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of element in the input range.
-/// \param [in] predicate - unary function object that will be used for selecting flags.
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [in] flags iterator to the selection flag corresponding to the first element from \p input range.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of element in the input range.
+/// \param [in] predicate unary function object that will be used for selecting flags.
 /// The predicate must meet the C++ named requirement \p BinaryPredicate:
 ///   - The result of applying the predicate must be convertible to bool.
 ///   - The predicate must accept const object arguments, with the same behavior regardless of
@@ -344,8 +358,8 @@ hipError_t select(void * temporary_storage,
 /// In practice, the signature of the function should be equivalent to the following:
 /// <tt>bool f(const T &a);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but the function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -396,7 +410,8 @@ template<class Config = default_config,
          class FlagIterator,
          class OutputIterator,
          class SelectedCountOutputIterator,
-         class UnaryPredicate>
+         class UnaryPredicate,
+         bool  UsingOrderedBlockId = false>
 inline hipError_t select(void*                       temporary_storage,
                          size_t&                     storage_size,
                          InputIterator               input,
@@ -420,6 +435,7 @@ inline hipError_t select(void*                       temporary_storage,
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
     return detail::partition_impl<detail::partition_subalgo::select_predicated_flag,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,
@@ -451,29 +467,32 @@ inline hipError_t select(void*                       temporary_storage,
 /// * By default <tt>InputIterator::value_type</tt>'s equality operator is used to check
 /// if elements are equivalent.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam UniqueCountOutputIterator - random-access iterator type of the unique_count_output
+/// \tparam UniqueCountOutputIterator random-access iterator type of the unique_count_output
 /// value used to return number of unique values. It can be a simple pointer type.
-/// \tparam EqualityOp - type of an binary operator used to compare values for equality.
+/// \tparam EqualityOp type of an binary operator used to compare values for equality.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the unique operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] unique_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of element in the input range.
-/// \param [in] equality_op - [optional] binary function object used to compare input values for equality.
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] unique_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of element in the input range.
+/// \param [in] equality_op [optional] binary function object used to compare input values for equality.
 /// The signature of the function should be equivalent to the following:
 /// <tt>bool equal_to(const T &a, const T &b);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -516,8 +535,8 @@ template<
     class InputIterator,
     class OutputIterator,
     class UniqueCountOutputIterator,
-    class EqualityOp = ::rocprim::equal_to<typename std::iterator_traits<InputIterator>::value_type>
->
+    class EqualityOp = ::rocprim::equal_to<typename std::iterator_traits<InputIterator>::value_type>,
+    bool  UsingOrderedBlockId = false>
 inline
 hipError_t unique(void * temporary_storage,
                   size_t& storage_size,
@@ -546,20 +565,22 @@ hipError_t unique(void * temporary_storage,
     using output_value_iterator_tuple = tuple<::rocprim::empty_type*, ::rocprim::empty_type*>;
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
-    return detail::partition_impl<detail::partition_subalgo::select_unique, Config, offset_type>(
-        temporary_storage,
-        storage_size,
-        input,
-        no_values,
-        flags,
-        output_tuple,
-        no_output_values,
-        unique_count_output,
-        size,
-        inequality_op,
-        stream,
-        debug_synchronous,
-        unary_predicate_type());
+    return detail::partition_impl<detail::partition_subalgo::select_unique,
+                                 UsingOrderedBlockId,
+                                 Config,
+                                 offset_type>(temporary_storage,
+                                              storage_size,
+                                              input,
+                                              no_values,
+                                              flags,
+                                              output_tuple,
+                                              no_output_values,
+                                              unique_count_output,
+                                              size,
+                                              inequality_op,
+                                              stream,
+                                              debug_synchronous,
+                                              unary_predicate_type());
 }
 
 /// \brief Device-level parallel unique by key primitive.
@@ -578,35 +599,38 @@ hipError_t unique(void * temporary_storage,
 /// * By default <tt>InputIterator::value_type</tt>'s equality operator is used to check
 /// if elements are equivalent.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam KeyIterator - random-access iterator type of the input key range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam KeyIterator random-access iterator type of the input key range. It can be
 /// a simple pointer type.
-/// \tparam ValueIterator - random-access iterator type of the input value range. It can be
+/// \tparam ValueIterator random-access iterator type of the input value range. It can be
 /// a simple pointer type.
-/// \tparam OutputKeyIterator - random-access iterator type of the output key range. It can be
+/// \tparam OutputKeyIterator random-access iterator type of the output key range. It can be
 /// a simple pointer type.
-/// \tparam OutputValueIterator - random-access iterator type of the output value range. It can be
+/// \tparam OutputValueIterator random-access iterator type of the output value range. It can be
 /// a simple pointer type.
-/// \tparam UniqueCountOutputIterator - random-access iterator type of the unique_count_output
+/// \tparam UniqueCountOutputIterator random-access iterator type of the unique_count_output
 /// value used to return number of unique keys and values. It can be a simple pointer type.
-/// \tparam EqualityOp - type of an binary operator used to compare keys for equality.
+/// \tparam EqualityOp type of an binary operator used to compare keys for equality.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the unique operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] keys_input - iterator to the first element in the range to select keys from.
-/// \param [in] values_input - iterator to the first element in the range of values corresponding to keys
-/// \param [out] keys_output - iterator to the first element in the output key range.
-/// \param [out] values_output - iterator to the first element in the output value range.
-/// \param [out] unique_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of element in the input range.
-/// \param [in] equality_op - [optional] binary function object used to compare input values for equality.
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] keys_input iterator to the first element in the range to select keys from.
+/// \param [in] values_input iterator to the first element in the range of values corresponding to keys
+/// \param [out] keys_output iterator to the first element in the output key range.
+/// \param [out] values_output iterator to the first element in the output value range.
+/// \param [out] unique_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of element in the input range.
+/// \param [in] equality_op [optional] binary function object used to compare input values for equality.
 /// The signature of the function should be equivalent to the following:
 /// <tt>bool equal_to(const T &a, const T &b);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 template <typename Config = default_config,
           typename KeyIterator,
@@ -615,7 +639,8 @@ template <typename Config = default_config,
           typename OutputValueIterator,
           typename UniqueCountOutputIterator,
           typename EqualityOp
-          = ::rocprim::equal_to<typename std::iterator_traits<KeyIterator>::value_type>>
+          = ::rocprim::equal_to<typename std::iterator_traits<KeyIterator>::value_type>,
+          bool     UsingOrderedBlockId = false>
 inline hipError_t unique_by_key(void*                           temporary_storage,
                                 size_t&                         storage_size,
                                 const KeyIterator               keys_input,
@@ -644,6 +669,7 @@ inline hipError_t unique_by_key(void*                           temporary_storag
     const output_value_iterator_tuple output_value_tuple{values_output, nullptr};
 
     return detail::partition_impl<detail::partition_subalgo::select_unique_by_key,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,

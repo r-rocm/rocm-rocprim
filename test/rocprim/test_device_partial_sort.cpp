@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,31 +20,38 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_data_generation.hpp"
+#include "../../common/utils_device_ptr.hpp"
+
 // required test headers
 #include "indirect_iterator.hpp"
+#include "test_seed.hpp"
 #include "test_utils.hpp"
 #include "test_utils_assertions.hpp"
 #include "test_utils_custom_float_type.hpp"
 #include "test_utils_custom_test_types.hpp"
 #include "test_utils_data_generation.hpp"
+#include "test_utils_hipgraphs.hpp"
 #include "test_utils_sort_comparator.hpp"
-#include "test_utils_types.hpp"
-
-#include "../common_test_header.hpp"
 
 // required rocprim headers
-#include <algorithm>
+#include <rocprim/block/block_radix_rank.hpp>
+#include <rocprim/config.hpp>
 #include <rocprim/device/config_types.hpp>
 #include <rocprim/device/detail/device_config_helper.hpp>
 #include <rocprim/device/device_partial_sort.hpp>
+#include <rocprim/device/device_partial_sort_config.hpp>
 #include <rocprim/functional.hpp>
+#include <rocprim/types.hpp>
 
-#include <iostream>
-#include <iterator>
-#include <vector>
-
-#include <cassert>
+#include <algorithm>
 #include <cstddef>
+#include <stdint.h>
+#include <type_traits>
+#include <vector>
 
 // Params for tests
 template<class KeyType,
@@ -81,7 +88,7 @@ using RocprimDevicePartialSortTestsParams = ::testing::Types<
     DevicePartialSortParams<unsigned short>,
     DevicePartialSortParams<char>,
     DevicePartialSortParams<const int>,
-    DevicePartialSortParams<test_utils::custom_test_type<int>>,
+    DevicePartialSortParams<common::custom_type<int, int, true>>,
     DevicePartialSortParams<unsigned long>,
     DevicePartialSortParams<long long, ::rocprim::greater<long long>>,
     DevicePartialSortParams<const float>,
@@ -90,7 +97,7 @@ using RocprimDevicePartialSortTestsParams = ::testing::Types<
     DevicePartialSortParams<rocprim::half>,
     DevicePartialSortParams<rocprim::bfloat16>,
     DevicePartialSortParams<double>,
-    DevicePartialSortParams<test_utils::custom_test_type<float>>,
+    DevicePartialSortParams<common::custom_type<float, float, true>>,
     DevicePartialSortParams<test_utils::custom_float_type>,
     DevicePartialSortParams<test_utils::custom_test_array_type<int, 4>>,
     DevicePartialSortParams<int, ::rocprim::less<int>, rocprim::default_config, false, true>,
@@ -101,12 +108,12 @@ using RocprimDevicePartialSortTestsParams = ::testing::Types<
             rocprim::
                 nth_element_config<128, 4, 32, 16, rocprim::block_radix_rank_algorithm::basic>>>,
     DevicePartialSortParams<
-        test_utils::custom_test_type<int>,
-        ::rocprim::less<test_utils::custom_test_type<int>>,
+        common::custom_type<int, int, true>,
+        ::rocprim::less<common::custom_type<int, int, true>>,
         rocprim::default_config,
         false,
         false,
-        test_utils::custom_test_type_decomposer<test_utils::custom_test_type<int>>>>;
+        test_utils::custom_test_type_decomposer<common::custom_type<int, int, true>>>>;
 
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_partial_sort_cpp_14(InputVector     input,
@@ -133,7 +140,6 @@ void inline compare_partial_sort_cpp_14(InputVector     input,
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(sorted_output, sorted_input));
 }
 
-#if CPP17
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_partial_sort_cpp_17(InputVector     input,
                                         OutputVector    output,
@@ -162,7 +168,6 @@ void inline compare_partial_sort_cpp_17(InputVector     input,
     // Check if the values are the same
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(sorted_output, sorted_input));
 }
-#endif
 
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_partial_sort(InputVector     input,
@@ -171,12 +176,7 @@ void inline compare_partial_sort(InputVector     input,
                                  CompareFunction compare_op)
 {
     compare_partial_sort_cpp_14(input, output, middle, compare_op);
-#if CPP17
-    // this comparison is only compiled and executed if c++17 is available
     compare_partial_sort_cpp_17(input, output, middle, compare_op);
-#else
-    ROCPRIM_PRAGMA_MESSAGE("c++17 not available skips direct comparison with std::partial_sort");
-#endif
 }
 
 TYPED_TEST_SUITE(RocprimDevicePartialSortTests, RocprimDevicePartialSortTestsParams);
@@ -194,7 +194,7 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSort)
     const bool            debug_synchronous     = TestFixture::debug_synchronous;
     constexpr bool        use_indirect_iterator = TestFixture::use_indirect_iterator;
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; ++seed_index)
+    for(size_t seed_index = 0; seed_index < number_of_runs; ++seed_index)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -222,30 +222,24 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSort)
                     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
                 }
 
-                std::vector<key_type> input = test_utils::get_random_data<key_type>(
+                std::vector<key_type> input = test_utils::get_random_data_wrapped<key_type>(
                     size,
-                    test_utils::generate_limits<key_type>::min(),
-                    test_utils::generate_limits<key_type>::max(),
+                    common::generate_limits<key_type>::min(),
+                    common::generate_limits<key_type>::max(),
                     seed_value);
 
-                key_type* d_input;
-                HIP_CHECK(test_common_utils::hipMallocHelper(&d_input, size * sizeof(key_type)));
-                HIP_CHECK(hipMemcpy(d_input,
-                                    input.data(),
-                                    size * sizeof(key_type),
-                                    hipMemcpyHostToDevice));
+                common::device_ptr<key_type> d_input(input);
 
-                key_type* d_output;
-                d_output = d_input;
+                common::device_ptr<key_type>& d_output = d_input;
 
                 const auto input_it
-                    = test_utils::wrap_in_indirect_iterator<use_indirect_iterator>(d_input);
+                    = test_utils::wrap_in_indirect_iterator<use_indirect_iterator>(d_input.get());
 
                 compare_function compare_op;
                 decomposer       decomposer_op;
 
                 // Allocate temporary storage
-                size_t temp_storage_size_bytes{};
+                size_t temp_storage_size_bytes;
                 HIP_CHECK(rocprim::partial_sort<config>(nullptr,
                                                         temp_storage_size_bytes,
                                                         input_it,
@@ -257,16 +251,15 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSort)
                                                         decomposer_op));
 
                 ASSERT_GT(temp_storage_size_bytes, 0);
-                void* d_temp_storage{};
-                HIP_CHECK(
-                    test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
 
-                test_utils::GraphHelper gHelper;;
+                common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
+
+                test_utils::GraphHelper gHelper;
                 if(TestFixture::use_graphs)
                 {
                     gHelper.startStreamCapture(stream);
                 }
-                HIP_CHECK(rocprim::partial_sort<config>(d_temp_storage,
+                HIP_CHECK(rocprim::partial_sort<config>(d_temp_storage.get(),
                                                         temp_storage_size_bytes,
                                                         input_it,
                                                         middle,
@@ -282,16 +275,9 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSort)
                     gHelper.createAndLaunchGraph(stream);
                 }
 
-                std::vector<key_type> output(size);
-                HIP_CHECK(hipMemcpy(output.data(),
-                                    d_output,
-                                    size * sizeof(key_type),
-                                    hipMemcpyDeviceToHost));
+                const auto output = d_output.load();
 
                 compare_partial_sort(input, output, middle, compare_op);
-
-                HIP_CHECK(hipFree(d_input));
-                HIP_CHECK(hipFree(d_temp_storage));
 
                 if(TestFixture::use_graphs)
                 {
@@ -336,7 +322,6 @@ void inline compare_partial_sort_copy_cpp_14(InputVector     input,
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected_output));
 }
 
-#if CPP17
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_partial_sort_copy_cpp_17(InputVector     input,
                                              OutputVector    output,
@@ -362,7 +347,6 @@ void inline compare_partial_sort_copy_cpp_17(InputVector     input,
     // Check if the values are the same
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(sorted_output, output));
 }
-#endif
 
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_partial_sort_copy(InputVector     input,
@@ -372,13 +356,7 @@ void inline compare_partial_sort_copy(InputVector     input,
                                       CompareFunction compare_op)
 {
     compare_partial_sort_copy_cpp_14(input, output, orignal_output, middle, compare_op);
-#if CPP17
-    // this comparison is only compiled and executed if c++17 is available
     compare_partial_sort_copy_cpp_17(input, output, orignal_output, middle, compare_op);
-#else
-    ROCPRIM_PRAGMA_MESSAGE(
-        "c++17 not available skips direct comparison with std::partial_sort_copy");
-#endif
 }
 
 TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
@@ -395,7 +373,7 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
     constexpr bool        input_is_const        = std::is_const_v<typename TestFixture::key_type>;
     constexpr bool        use_indirect_iterator = TestFixture::use_indirect_iterator;
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; ++seed_index)
+    for(size_t seed_index = 0; seed_index < number_of_runs; ++seed_index)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -423,34 +401,23 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
                     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
                 }
 
-                std::vector<key_type> input = test_utils::get_random_data<key_type>(
+                std::vector<key_type> input = test_utils::get_random_data_wrapped<key_type>(
                     size,
-                    test_utils::generate_limits<key_type>::min(),
-                    test_utils::generate_limits<key_type>::max(),
+                    common::generate_limits<key_type>::min(),
+                    common::generate_limits<key_type>::max(),
                     seed_value);
-                std::vector<key_type> output_original = test_utils::get_random_data<key_type>(
-                    size,
-                    test_utils::generate_limits<key_type>::min(),
-                    test_utils::generate_limits<key_type>::max(),
-                    seed_value + 1);
+                std::vector<key_type> output_original
+                    = test_utils::get_random_data_wrapped<key_type>(
+                        size,
+                        common::generate_limits<key_type>::min(),
+                        common::generate_limits<key_type>::max(),
+                        seed_value + 1);
 
-                key_type* d_input;
-                HIP_CHECK(test_common_utils::hipMallocHelper(&d_input, size * sizeof(key_type)));
-                HIP_CHECK(hipMemcpy(d_input,
-                                    input.data(),
-                                    size * sizeof(key_type),
-                                    hipMemcpyHostToDevice));
-
-                key_type* d_output;
-
-                HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, size * sizeof(key_type)));
-                HIP_CHECK(hipMemcpy(d_output,
-                                    output_original.data(),
-                                    size * sizeof(key_type),
-                                    hipMemcpyHostToDevice));
+                common::device_ptr<key_type> d_input(input);
+                common::device_ptr<key_type> d_output(output_original);
 
                 const auto input_it = test_utils::wrap_in_indirect_iterator<use_indirect_iterator>(
-                    test_utils::wrap_in_const<input_is_const>(d_input));
+                    test_utils::wrap_in_const<input_is_const>(d_input.get()));
 
                 compare_function compare_op;
                 decomposer       decomposer_op;
@@ -461,7 +428,7 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
                 HIP_CHECK(rocprim::partial_sort_copy<config>(nullptr,
                                                              temp_storage_size_bytes,
                                                              input_it,
-                                                             d_output,
+                                                             d_output.get(),
                                                              middle,
                                                              size,
                                                              compare_op,
@@ -470,20 +437,19 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
                                                              decomposer_op));
 
                 ASSERT_GT(temp_storage_size_bytes, 0);
-                void* d_temp_storage{};
-                HIP_CHECK(
-                    test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
 
-                test_utils::GraphHelper gHelper;;
+                common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
+
+                test_utils::GraphHelper gHelper;
                 if(TestFixture::use_graphs)
                 {
                     gHelper.startStreamCapture(stream);
                 }
 
-                HIP_CHECK(rocprim::partial_sort_copy<config>(d_temp_storage,
+                HIP_CHECK(rocprim::partial_sort_copy<config>(d_temp_storage.get(),
                                                              temp_storage_size_bytes,
                                                              input_it,
-                                                             d_output,
+                                                             d_output.get(),
                                                              middle,
                                                              size,
                                                              compare_op,
@@ -497,17 +463,9 @@ TYPED_TEST(RocprimDevicePartialSortTests, PartialSortCopy)
                     gHelper.createAndLaunchGraph(stream);
                 }
 
-                std::vector<key_type> output(size);
-                HIP_CHECK(hipMemcpy(output.data(),
-                                    d_output,
-                                    size * sizeof(key_type),
-                                    hipMemcpyDeviceToHost));
+                const auto output = d_output.load();
 
                 compare_partial_sort_copy(input, output, output_original, middle, compare_op);
-
-                HIP_CHECK(hipFree(d_input));
-                HIP_CHECK(hipFree(d_output));
-                HIP_CHECK(hipFree(d_temp_storage));
 
                 if(TestFixture::use_graphs)
                 {

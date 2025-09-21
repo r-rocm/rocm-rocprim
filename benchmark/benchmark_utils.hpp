@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,39 +21,45 @@
 #ifndef ROCPRIM_BENCHMARK_UTILS_HPP_
 #define ROCPRIM_BENCHMARK_UTILS_HPP_
 
+#include "../common/utils.hpp"
+#include "../common/utils_custom_type.hpp"
+#include "../common/utils_data_generation.hpp"
+#include "../common/utils_half.hpp"
+
 #include <benchmark/benchmark.h>
 
 // rocPRIM
 #include <rocprim/block/block_load.hpp>
 #include <rocprim/block/block_scan.hpp>
+#include <rocprim/config.hpp>
 #include <rocprim/device/config_types.hpp>
 #include <rocprim/device/detail/device_config_helper.hpp> // partition_config_params
 #include <rocprim/intrinsics/arch.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+#include <rocprim/type_traits.hpp>
 #include <rocprim/types.hpp>
+#include <rocprim/types/tuple.hpp>
+
+// CmdParser
+#include "cmdparser.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <random>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
+#include <stdint.h>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#define HIP_CHECK(condition)                                                                \
-    {                                                                                       \
-        hipError_t error = condition;                                                       \
-        if(error != hipSuccess)                                                             \
-        {                                                                                   \
-            std::cout << "HIP error: " << hipGetErrorString(error) << " file: " << __FILE__ \
-                      << " line: " << __LINE__ << std::endl;                                \
-            exit(error);                                                                    \
-        }                                                                                   \
-    }
 
 #define TUNING_SHARED_MEMORY_MAX 65536u
 // Support half operators on host side
@@ -81,6 +87,8 @@ public:
         }
     }
 
+    managed_seed() {}
+
     unsigned int get_0() const
     {
         return is_random ? std::random_device{}() : seeds[0];
@@ -101,94 +109,65 @@ private:
     bool                        is_random;
 };
 
-ROCPRIM_HOST inline
-rocprim::native_half half_to_native(const rocprim::half& x)
-{
-    return *reinterpret_cast<const rocprim::native_half *>(&x);
-}
-
-ROCPRIM_HOST inline
-rocprim::half native_to_half(const rocprim::native_half& x)
-{
-    return *reinterpret_cast<const rocprim::half *>(&x);
-}
-
 struct half_less
 {
-    ROCPRIM_HOST_DEVICE inline
-    bool operator()(const rocprim::half& a, const rocprim::half& b) const
+    ROCPRIM_HOST_DEVICE
+    inline bool
+        operator()(const rocprim::half& a, const rocprim::half& b) const
     {
-        #if __HIP_DEVICE_COMPILE__
+#if __HIP_DEVICE_COMPILE__
         return a < b;
-        #else
-        return half_to_native(a) < half_to_native(b);
-        #endif
+#else
+        return common::half_to_native(a) < common::half_to_native(b);
+#endif
     }
 };
 
 struct half_plus
 {
-    ROCPRIM_HOST_DEVICE inline
-    rocprim::half operator()(const rocprim::half& a, const rocprim::half& b) const
+    ROCPRIM_HOST_DEVICE
+    inline rocprim::half
+        operator()(const rocprim::half& a, const rocprim::half& b) const
     {
-        #if __HIP_DEVICE_COMPILE__
+#if __HIP_DEVICE_COMPILE__
         return a + b;
-        #else
-        return native_to_half(half_to_native(a) + half_to_native(b));
-        #endif
+#else
+        return common::native_to_half(common::half_to_native(a) + common::half_to_native(b));
+#endif
     }
 };
 
 struct half_equal_to
 {
-    ROCPRIM_HOST_DEVICE inline
-    bool operator()(const rocprim::half& a, const rocprim::half& b) const
+    ROCPRIM_HOST_DEVICE
+    inline bool
+        operator()(const rocprim::half& a, const rocprim::half& b) const
     {
-        #if __HIP_DEVICE_COMPILE__
+#if __HIP_DEVICE_COMPILE__
         return a == b;
-        #else
-        return half_to_native(a) == half_to_native(b);
-        #endif
+#else
+        return common::half_to_native(a) == common::half_to_native(b);
+#endif
     }
 };
-
-// std::uniform_int_distribution is undefined for anything other than:
-// short, int, long, long long, unsigned short, unsigned int, unsigned long, or unsigned long long
-template <typename T>
-struct is_valid_for_int_distribution :
-    std::integral_constant<bool,
-        std::is_same<short, T>::value ||
-        std::is_same<unsigned short, T>::value ||
-        std::is_same<int, T>::value ||
-        std::is_same<unsigned int, T>::value ||
-        std::is_same<long, T>::value ||
-        std::is_same<unsigned long, T>::value ||
-        std::is_same<long long, T>::value ||
-        std::is_same<unsigned long long, T>::value
-    > {};
-
-template<typename Iterator>
-using it_value_t = typename std::iterator_traits<Iterator>::value_type;
 
 using engine_type = std::minstd_rand;
 
 // generate_random_data_n() generates only part of sequence and replicates it,
 // because benchmarks usually do not need "true" random sequence.
-template<class OutputIter, class U, class V, class Generator>
+template<typename OutputIter, typename U, typename V, typename Generator>
 inline auto generate_random_data_n(
     OutputIter it, size_t size, U min, V max, Generator& gen, size_t max_random_size = 1024 * 1024)
-    -> typename std::enable_if_t<rocprim::is_integral<it_value_t<OutputIter>>::value, OutputIter>
+    -> typename std::enable_if_t<rocprim::is_integral<common::it_value_t<OutputIter>>::value,
+                                 OutputIter>
 {
-    using T = it_value_t<OutputIter>;
+    using T = common::it_value_t<OutputIter>;
 
     using dis_type = typename std::conditional<
-        is_valid_for_int_distribution<T>::value,
+        common::is_valid_for_int_distribution<T>::value,
         T,
-        typename std::conditional<std::is_signed<T>::value,
-            int,
-            unsigned int>::type
-        >::type;
-    std::uniform_int_distribution<dis_type> distribution((T)min, (T)max);
+        typename std::conditional<std::is_signed<T>::value, int, unsigned int>::type>::type;
+    common::uniform_int_distribution<dis_type> distribution((T)min, (T)max);
     std::generate_n(it, std::min(size, max_random_size), [&]() { return distribution(gen); });
     for(size_t i = max_random_size; i < size; i += max_random_size)
     {
@@ -197,14 +176,14 @@ inline auto generate_random_data_n(
     return it + size;
 }
 
-template<class OutputIterator, class U, class V, class Generator>
+template<typename OutputIterator, typename U, typename V, typename Generator>
 inline auto generate_random_data_n(OutputIterator it,
                                    size_t         size,
                                    U              min,
                                    V              max,
                                    Generator&     gen,
                                    size_t         max_random_size = 1024 * 1024)
-    -> std::enable_if_t<rocprim::is_floating_point<it_value_t<OutputIterator>>::value,
+    -> std::enable_if_t<rocprim::is_floating_point<common::it_value_t<OutputIterator>>::value,
                         OutputIterator>
 {
     using T = typename std::iterator_traits<OutputIterator>::value_type;
@@ -223,7 +202,7 @@ inline auto generate_random_data_n(OutputIterator it,
     return it + size;
 }
 
-template<class T>
+template<typename T>
 inline std::vector<T>
     get_random_data01(size_t size, float p, unsigned int seed, size_t max_random_size = 1024 * 1024)
 {
@@ -239,59 +218,6 @@ inline std::vector<T>
     }
     return data;
 }
-
-template<class T, class U = T>
-struct custom_type
-{
-    using first_type = T;
-    using second_type = U;
-
-    T x;
-    U y;
-
-    ROCPRIM_HOST_DEVICE inline
-    custom_type(T xx = 0, U yy = 0) : x(xx), y(yy)
-    {
-    }
-
-    ROCPRIM_HOST_DEVICE inline
-    ~custom_type() = default;
-
-    ROCPRIM_HOST_DEVICE inline
-    custom_type operator+(const custom_type& rhs) const
-    {
-        return custom_type(x + rhs.x, y + rhs.y);
-    }
-
-    ROCPRIM_HOST_DEVICE inline
-    bool operator<(const custom_type& rhs) const
-    {
-        // intentionally suboptimal choice for short-circuting,
-        // required to generate more performant device code
-        return ((x == rhs.x && y < rhs.y) || x < rhs.x);
-    }
-
-    ROCPRIM_HOST_DEVICE inline
-    bool operator==(const custom_type& rhs) const
-    {
-        return x == rhs.x && y == rhs.y;
-    }
-
-    ROCPRIM_HOST_DEVICE custom_type& operator+=(const custom_type& rhs)
-    {
-        this->x += rhs.x;
-        this->y += rhs.y;
-        return *this;
-    }
-};
-
-template<typename>
-struct is_custom_type : std::false_type
-{};
-
-template<class T, class U>
-struct is_custom_type<custom_type<T, U>> : std::true_type
-{};
 
 template<typename T, typename U>
 struct is_comparable
@@ -312,46 +238,36 @@ public:
 };
 
 template<typename T, typename U, typename V>
-struct is_comparable<custom_type<U, V>, T>
+struct is_comparable<common::custom_type<U, V>, T>
     : std::conditional_t<rocprim::is_arithmetic<T>::value
-                             || !std::is_same<T, custom_type<U, V>>::value,
+                             || !std::is_same<T, common::custom_type<U, V>>::value,
                          std::false_type,
                          std::true_type>
 {};
 
-template<class CustomType>
+template<typename CustomType>
 struct custom_type_decomposer
 {
-    static_assert(is_custom_type<CustomType>::value,
-                  "custom_type_decomposer can only be used with instantiations of custom_type");
+    static_assert(
+        common::is_custom_type<CustomType>::value,
+        "custom_type_decomposer can only be used with instantiations of common::custom_type");
 
     using T = typename CustomType::first_type;
     using U = typename CustomType::second_type;
 
-    __host__ __device__ ::rocprim::tuple<T&, U&> operator()(CustomType& key) const
+    __host__ __device__
+    ::rocprim::tuple<T&, U&>
+        operator()(CustomType& key) const
     {
         return ::rocprim::tuple<T&, U&>{key.x, key.y};
     }
 };
 
-template<class T, class enable = void>
-struct generate_limits;
-
-template<class T>
-struct generate_limits<T, std::enable_if_t<rocprim::is_integral<T>::value>>
+namespace common
 {
-    static inline T min()
-    {
-        return rocprim::numeric_limits<T>::min();
-    }
-    static inline T max()
-    {
-        return rocprim::numeric_limits<T>::max();
-    }
-};
 
-template<class T>
-struct generate_limits<T, std::enable_if_t<is_custom_type<T>::value>>
+template<typename T>
+struct generate_limits<T, std::enable_if_t<common::is_custom_type<T>::value>>
 {
     using F = typename T::first_type;
     using S = typename T::second_type;
@@ -365,31 +281,21 @@ struct generate_limits<T, std::enable_if_t<is_custom_type<T>::value>>
     }
 };
 
-template<class T>
-struct generate_limits<T, std::enable_if_t<rocprim::is_floating_point<T>::value>>
-{
-    static inline T min()
-    {
-        return T(-1000);
-    }
-    static inline T max()
-    {
-        return T(1000);
-    }
-};
+} // namespace common
 
-template<class OutputIterator, class Generator>
-inline auto generate_random_data_n(OutputIterator             it,
-                                   size_t                     size,
-                                   it_value_t<OutputIterator> min,
-                                   it_value_t<OutputIterator> max,
-                                   Generator&                 gen,
-                                   size_t                     max_random_size = 1024 * 1024)
-    -> std::enable_if_t<is_custom_type<it_value_t<OutputIterator>>::value, OutputIterator>
+template<typename OutputIterator, typename Generator>
+inline auto generate_random_data_n(OutputIterator                     it,
+                                   size_t                             size,
+                                   common::it_value_t<OutputIterator> min,
+                                   common::it_value_t<OutputIterator> max,
+                                   Generator&                         gen,
+                                   size_t                             max_random_size = 1024 * 1024)
+    -> std::enable_if_t<common::is_custom_type<common::it_value_t<OutputIterator>>::value,
+                        OutputIterator>
 {
-    using T = it_value_t<OutputIterator>;
+    using T = common::it_value_t<OutputIterator>;
 
-    using first_type = typename T::first_type;
+    using first_type  = typename T::first_type;
     using second_type = typename T::second_type;
 
     std::vector<first_type>  fdata(size);
@@ -397,37 +303,37 @@ inline auto generate_random_data_n(OutputIterator             it,
     generate_random_data_n(fdata.begin(), size, min.x, max.x, gen, max_random_size);
     generate_random_data_n(sdata.begin(), size, min.y, max.y, gen, max_random_size);
 
-    for(size_t i = 0; i < size; i++)
+    for(size_t i = 0; i < size; ++i)
     {
         it[i] = T(fdata[i], sdata[i]);
     }
     return it + size;
 }
 
-template<class OutputIterator, class Generator>
-inline auto generate_random_data_n(OutputIterator             it,
-                                   size_t                     size,
-                                   it_value_t<OutputIterator> min,
-                                   it_value_t<OutputIterator> max,
-                                   Generator&                 gen,
-                                   size_t                     max_random_size = 1024 * 1024)
-    -> std::enable_if_t<!is_custom_type<it_value_t<OutputIterator>>::value
+template<typename OutputIterator, typename Generator>
+inline auto generate_random_data_n(OutputIterator                     it,
+                                   size_t                             size,
+                                   common::it_value_t<OutputIterator> min,
+                                   common::it_value_t<OutputIterator> max,
+                                   Generator&                         gen,
+                                   size_t                             max_random_size = 1024 * 1024)
+    -> std::enable_if_t<!common::is_custom_type<common::it_value_t<OutputIterator>>::value
                             && !std::is_same<decltype(max.x), void>::value,
                         OutputIterator>
 {
-    using T = it_value_t<OutputIterator>;
+    using T = common::it_value_t<OutputIterator>;
 
     using field_type = decltype(max.x);
     std::vector<field_type> field_data(size);
     generate_random_data_n(field_data.begin(), size, min.x, max.x, gen, max_random_size);
-    for(size_t i = 0; i < size; i++)
+    for(size_t i = 0; i < size; ++i)
     {
         it[i] = T(field_data[i]);
     }
     return it + size;
 }
 
-template<class T, class U, class V>
+template<typename T, typename U, typename V>
 inline std::vector<T> get_random_data(
     size_t size, U min, V max, unsigned int seed, size_t max_random_size = 1024 * 1024)
 {
@@ -483,9 +389,9 @@ auto limit_cast(U value) -> T
 }
 
 // This overload below is selected for non-standard float types, e.g. half, which cannot be compared with the limit types.
-template<class T, class U, class V>
+template<typename T, typename U, typename V>
 inline auto limit_random_range(U range_start, V range_end)
-    -> std::enable_if_t<!is_custom_type<T>::value
+    -> std::enable_if_t<!common::is_custom_type<T>::value
                             && (!is_comparable<T, U>::value || !is_comparable<T, V>::value),
                         std::pair<T, T>>
 {
@@ -494,7 +400,8 @@ inline auto limit_random_range(U range_start, V range_end)
 
 template<typename T, typename U, typename V>
 auto limit_random_range(U range_start, V range_end)
-    -> std::enable_if_t<(is_custom_type<T>::value && is_comparable<typename T::first_type, U>::value
+    -> std::enable_if_t<(common::is_custom_type<T>::value
+                         && is_comparable<typename T::first_type, U>::value
                          && is_comparable<typename T::second_type, U>::value
                          && is_comparable<typename T::first_type, V>::value
                          && is_comparable<typename T::second_type, V>::value
@@ -512,9 +419,9 @@ auto limit_random_range(U range_start, V range_end)
     };
 }
 
-template<class T, class U, class V>
+template<typename T, typename U, typename V>
 inline auto limit_random_range(U range_start, V range_end)
-    -> std::enable_if_t<!is_custom_type<T>::value && is_comparable<T, U>::value
+    -> std::enable_if_t<!common::is_custom_type<T>::value && is_comparable<T, U>::value
                             && is_comparable<T, V>::value,
                         std::pair<T, T>>
 {
@@ -540,10 +447,6 @@ inline bool is_warp_size_supported(const unsigned int required_warp_size, const 
     return warp_size >= required_warp_size;
 }
 
-template<unsigned int LogicalWarpSize>
-__device__ constexpr bool device_test_enabled_for_warp_size_v
-    = ::rocprim::arch::wavefront::min_size() >= LogicalWarpSize;
-
 /// \brief Get segments of uniform random size in [1, max_segment_length] with random key.
 template<typename T>
 std::vector<T>
@@ -551,15 +454,15 @@ std::vector<T>
 {
     static_assert(rocprim::is_arithmetic<T>::value, "Key type must be arithmetic");
 
-    engine_type                           prng(seed);
-    std::uniform_int_distribution<size_t> segment_length_distribution(
+    engine_type                              prng(seed);
+    common::uniform_int_distribution<size_t> segment_length_distribution(
         std::numeric_limits<size_t>::min(),
         max_segment_length);
     // std::uniform_real_distribution cannot handle rocprim::half, use float instead
     using dis_type =
         typename std::conditional<std::is_same<rocprim::half, T>::value, float, T>::type;
     using key_distribution_type = std::conditional_t<rocprim::is_integral<T>::value,
-                                                     std::uniform_int_distribution<dis_type>,
+                                                     common::uniform_int_distribution<dis_type>,
                                                      std::uniform_real_distribution<dis_type>>;
     key_distribution_type key_distribution(rocprim::numeric_limits<T>::max());
     std::vector<T>        keys(size);
@@ -581,8 +484,8 @@ template<typename T>
 std::vector<T>
     get_random_segments_iota(const size_t size, const size_t max_segment_length, unsigned int seed)
 {
-    engine_type                           prng(seed);
-    std::uniform_int_distribution<size_t> segment_length_distribution(1, max_segment_length);
+    engine_type                              prng(seed);
+    common::uniform_int_distribution<size_t> segment_length_distribution(1, max_segment_length);
 
     std::vector<T> keys(size);
 
@@ -599,7 +502,7 @@ std::vector<T>
     return keys;
 }
 
-template<class T, class U, class V>
+template<typename T, typename U, typename V>
 inline auto get_random_value(U min, V max, size_t seed_value)
     -> std::enable_if_t<rocprim::is_arithmetic<T>::value, T>
 {
@@ -609,9 +512,9 @@ inline auto get_random_value(U min, V max, size_t seed_value)
     return result;
 }
 
-template<class T>
+template<typename T>
 inline auto get_random_value(T min, T max, size_t seed_value)
-    -> std::enable_if_t<is_custom_type<T>::value, T>
+    -> std::enable_if_t<common::is_custom_type<T>::value, T>
 {
     typename T::first_type  result_first;
     typename T::second_type result_second;
@@ -621,17 +524,17 @@ inline auto get_random_value(T min, T max, size_t seed_value)
     return T{result_first, result_second};
 }
 
-template <typename T, T, typename>
+template<typename T, T, typename>
 struct make_index_range_impl;
 
-template <typename T, T Start, T... I>
+template<typename T, T Start, T... I>
 struct make_index_range_impl<T, Start, std::integer_sequence<T, I...>>
 {
     using type = std::integer_sequence<T, (Start + I)...>;
 };
 
 // make a std::integer_sequence with values from Start to End inclusive
-template <typename T, T Start, T End>
+template<typename T, T Start, T End>
 using make_index_range =
     typename make_index_range_impl<T, Start, std::make_integer_sequence<T, End - Start + 1>>::type;
 
@@ -649,85 +552,6 @@ void static_for_each(Args&&... args)
     static_for_each_impl<typename Indices::value_type, Function>(Indices{},
                                                                  std::forward<Args>(args)...);
 }
-
-#define REGISTER_BENCHMARK(benchmarks, size, seed, stream, instance)                     \
-    benchmark::internal::Benchmark* benchmark = benchmark::RegisterBenchmark(            \
-        instance.name().c_str(),                                                         \
-        [instance](benchmark::State&   state,                                            \
-                   size_t              _size,                                            \
-                   const managed_seed& _seed,                                            \
-                   hipStream_t         _stream) { instance.run(state, _size, _seed, _stream); }, \
-        size,                                                                            \
-        seed,                                                                            \
-        stream);                                                                         \
-    benchmarks.emplace_back(benchmark)
-
-struct config_autotune_interface
-{
-    virtual std::string name() const                               = 0;
-    virtual std::string sort_key() const
-    {
-        return name();
-    };
-    virtual ~config_autotune_interface()                                                = default;
-    virtual void run(benchmark::State&, size_t, const managed_seed&, hipStream_t) const = 0;
-};
-
-struct config_autotune_register
-{
-    static std::vector<std::unique_ptr<config_autotune_interface>>& vector() {
-        static std::vector<std::unique_ptr<config_autotune_interface>> storage;
-        return storage;
-    }
-
-    template <typename T>
-    static config_autotune_register create() {
-        vector().push_back(std::make_unique<T>());
-        return config_autotune_register();
-    }
-
-    template<typename BulkCreateFunction>
-    static config_autotune_register create_bulk(BulkCreateFunction&& f)
-    {
-        std::forward<BulkCreateFunction>(f)(vector());
-        return config_autotune_register();
-    }
-
-    // Register a subset of all created benchmarks for the current parallel instance and add to vector.
-    static void register_benchmark_subset(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                                          int                 parallel_instance_index,
-                                          int                 parallel_instance_count,
-                                          size_t              size,
-                                          const managed_seed& seed,
-                                          hipStream_t         stream)
-    {
-        std::vector<std::unique_ptr<config_autotune_interface>>& configs = vector();
-        // sorting to get a consistent order because order of initialization of static variables is undefined by the C++ standard.
-        std::sort(configs.begin(),
-                  configs.end(),
-                  [](const auto& l, const auto& r) { return l->sort_key() < r->sort_key(); });
-        size_t configs_per_instance
-            = (configs.size() + parallel_instance_count - 1) / parallel_instance_count;
-        size_t start = std::min(parallel_instance_index * configs_per_instance, configs.size());
-        size_t end = std::min((parallel_instance_index + 1) * configs_per_instance, configs.size());
-        for(size_t i = start; i < end; i++)
-        {
-            std::unique_ptr<config_autotune_interface>& uniq_ptr         = configs.at(i);
-            config_autotune_interface*                  tuning_benchmark = uniq_ptr.get();
-            benchmark::internal::Benchmark*             benchmark = benchmark::RegisterBenchmark(
-                tuning_benchmark->name().c_str(),
-                [tuning_benchmark](benchmark::State&   state,
-                                   size_t              size,
-                                   const managed_seed& seed,
-                                   hipStream_t         stream)
-                { tuning_benchmark->run(state, size, seed, stream); },
-                size,
-                seed,
-                stream);
-            benchmarks.emplace_back(benchmark);
-        }
-    }
-};
 
 // Inserts spaces at beginning of string if string shorter than specified length.
 inline std::string pad_string(std::string str, const size_t len)
@@ -801,7 +625,7 @@ private:
                 {
                     int n = std::min(brackets_count, static_cast<int>(m[3].length()));
                     brackets_count -= n;
-                    for(int c = 0; c < n; c++)
+                    for(int c = 0; c < n; ++c)
                     {
                         result << "}";
                     }
@@ -809,14 +633,14 @@ private:
             }
             else
             {
-                brackets_count++;
+                ++brackets_count;
                 result << "{";
                 insert_comma = false;
             }
         }
         while(brackets_count > 0)
         {
-            brackets_count--;
+            --brackets_count;
             result << "}";
         }
         return result.str();
@@ -845,7 +669,7 @@ private:
                 {
                     int n = std::min(brackets_count, static_cast<int>(m[3].length()));
                     brackets_count -= n;
-                    for(int c = 0; c < n; c++)
+                    for(int c = 0; c < n; ++c)
                     {
                         result << ">";
                     }
@@ -853,14 +677,14 @@ private:
             }
             else
             {
-                brackets_count++;
+                ++brackets_count;
                 result << "<";
                 insert_comma = false;
             }
         }
         while(brackets_count > 0)
         {
-            brackets_count--;
+            --brackets_count;
             result << ">";
         }
         return result.str();
@@ -870,7 +694,8 @@ public:
     static std::string format_name(std::string string)
     {
         format     format = get_format();
-std::regex r("([A-z0-9]*):\\s*((?:custom_type<[A-z0-9,]*>)|[A-z:\\(\\)\\.<>\\s0-9]*)(\\}*)");
+        std::regex r("([A-z0-9]*):\\s*((?:common::custom_type<[A-z0-9,]*>)|(?:common::custom_type_"
+                     "copyable<[A-z0-9,]*>)|[A-z:\\(\\)\\.<>\\s0-9]*)(\\}*)");
         // First we perform some checks
         bool checks[4] = {false};
         for(std::sregex_iterator i = std::sregex_iterator(string.begin(), string.end(), r);
@@ -918,11 +743,12 @@ std::regex r("([A-z0-9]*):\\s*((?:custom_type<[A-z0-9,]*>)|[A-z:\\(\\)\\.<>\\s0-
     }
 };
 
-template <typename T>
+template<typename T>
 struct Traits
 {
     //static inline method instead of static inline attribute because that's only supported from C++17 onwards
-    static inline const char* name(){
+    static inline const char* name()
+    {
         static_assert(sizeof(T) == 0, "Traits<T>::name() unknown");
         return "unknown";
     }
@@ -934,14 +760,26 @@ inline const char* Traits<char>::name()
 {
     return "char";
 }
-template <>
-inline const char* Traits<int>::name() { return "int"; }
-template <>
-inline const char* Traits<short>::name() { return "short"; }
-template <>
-inline const char* Traits<int8_t>::name() { return "int8_t"; }
-template <>
-inline const char* Traits<uint8_t>::name() { return "uint8_t"; }
+template<>
+inline const char* Traits<int>::name()
+{
+    return "int";
+}
+template<>
+inline const char* Traits<short>::name()
+{
+    return "short";
+}
+template<>
+inline const char* Traits<int8_t>::name()
+{
+    return "int8_t";
+}
+template<>
+inline const char* Traits<uint8_t>::name()
+{
+    return "uint8_t";
+}
 template<>
 inline const char* Traits<uint16_t>::name()
 {
@@ -969,57 +807,90 @@ inline const char* Traits<long long>::name()
 }
 // On MSVC `int64_t` and `long long` are the same, leading to multiple definition errors
 #ifndef _WIN32
-template <>
-inline const char* Traits<int64_t>::name() { return "int64_t"; }
+template<>
+inline const char* Traits<int64_t>::name()
+{
+    return "int64_t";
+}
 #endif
-template <>
-inline const char* Traits<float>::name() { return "float"; }
-template <>
-inline const char* Traits<double>::name() { return "double"; }
+// On MSVC `uint64_t` and `unsigned long long` are the same, leading to multiple definition errors
+#ifndef _WIN32
 template<>
-inline const char* Traits<custom_type<int, int>>::name()
+inline const char* Traits<uint64_t>::name()
 {
-    return "custom_type<int,int>";
+    return "uint64_t";
+}
+#else
+template<>
+inline const char* Traits<unsigned long long>::name()
+{
+    return "unsigned long long";
+}
+#endif
+template<>
+inline const char* Traits<float>::name()
+{
+    return "float";
 }
 template<>
-inline const char* Traits<custom_type<float, float>>::name()
+inline const char* Traits<double>::name()
 {
-    return "custom_type<float,float>";
+    return "double";
 }
 template<>
-inline const char* Traits<custom_type<double, double>>::name()
+inline const char* Traits<common::custom_type<int, int>>::name()
 {
-    return "custom_type<double,double>";
+    return "common::custom_type<int,int>";
 }
 template<>
-inline const char* Traits<custom_type<int, double>>::name()
+inline const char* Traits<common::custom_type<float, float>>::name()
 {
-    return "custom_type<int,double>";
+    return "common::custom_type<float,float>";
 }
 template<>
-inline const char* Traits<custom_type<char, double>>::name()
+inline const char* Traits<common::custom_huge_type<1024, float, float>>::name()
 {
-    return "custom_type<char,double>";
+    return "common::custom_type<1024,float,float>";
 }
 template<>
-inline const char* Traits<custom_type<char, short>>::name()
+inline const char* Traits<common::custom_huge_type<2048, float, float>>::name()
 {
-    return "custom_type<char,short>";
+    return "common::custom_type<2048,float,float>";
 }
 template<>
-inline const char* Traits<custom_type<long, double>>::name()
+inline const char* Traits<common::custom_type<double, double>>::name()
 {
-    return "custom_type<long,double>";
+    return "common::custom_type<double,double>";
 }
 template<>
-inline const char* Traits<custom_type<long long, double>>::name()
+inline const char* Traits<common::custom_type<int, double>>::name()
 {
-    return "custom_type<int64_t,double>";
+    return "common::custom_type<int,double>";
 }
 template<>
-inline const char* Traits<custom_type<float, int16_t>>::name()
+inline const char* Traits<common::custom_type<char, double>>::name()
 {
-    return "custom_type<float,int16_t>";
+    return "common::custom_type<char,double>";
+}
+template<>
+inline const char* Traits<common::custom_type<char, short>>::name()
+{
+    return "common::custom_type<char,short>";
+}
+template<>
+inline const char* Traits<common::custom_type<long, double>>::name()
+{
+    return "common::custom_type<long,double>";
+}
+template<>
+inline const char* Traits<common::custom_type<long long, double>>::name()
+{
+    return "common::custom_type<int64_t,double>";
+}
+template<>
+inline const char* Traits<common::custom_type<float, int16_t>>::name()
+{
+    return "common::custom_type<float,int16_t>";
 }
 template<>
 inline const char* Traits<rocprim::empty_type>::name()
@@ -1036,102 +907,25 @@ inline const char* Traits<HIP_vector_type<double, 2>>::name()
 {
     return "double2";
 }
-
-inline void add_common_benchmark_info()
+template<>
+inline const char* Traits<rocprim::int128_t>::name()
 {
-    hipDeviceProp_t   devProp;
-    int               device_id = 0;
-    HIP_CHECK(hipGetDevice(&device_id));
-    HIP_CHECK(hipGetDeviceProperties(&devProp, device_id));
-
-    auto str = [](const std::string& name, const std::string& val) {
-        benchmark::AddCustomContext(name, val);
-    };
-
-    auto num = [](const std::string& name, const auto& value) {
-        benchmark::AddCustomContext(name, std::to_string(value));
-    };
-
-    auto dim2 = [num](const std::string& name, const auto* values) {
-        num(name + "_x", values[0]);
-        num(name + "_y", values[1]);
-    };
-
-    auto dim3 = [num, dim2](const std::string& name, const auto* values) {
-        dim2(name, values);
-        num(name + "_z", values[2]);
-    };
-
-    str("hdp_name", devProp.name);
-    num("hdp_total_global_mem", devProp.totalGlobalMem);
-    num("hdp_shared_mem_per_block", devProp.sharedMemPerBlock);
-    num("hdp_regs_per_block", devProp.regsPerBlock);
-    num("hdp_warp_size", devProp.warpSize);
-    num("hdp_max_threads_per_block", devProp.maxThreadsPerBlock);
-    dim3("hdp_max_threads_dim", devProp.maxThreadsDim);
-    dim3("hdp_max_grid_size", devProp.maxGridSize);
-    num("hdp_clock_rate", devProp.clockRate);
-    num("hdp_memory_clock_rate", devProp.memoryClockRate);
-    num("hdp_memory_bus_width", devProp.memoryBusWidth);
-    num("hdp_total_const_mem", devProp.totalConstMem);
-    num("hdp_major", devProp.major);
-    num("hdp_minor", devProp.minor);
-    num("hdp_multi_processor_count", devProp.multiProcessorCount);
-    num("hdp_l2_cache_size", devProp.l2CacheSize);
-    num("hdp_max_threads_per_multiprocessor", devProp.maxThreadsPerMultiProcessor);
-    num("hdp_compute_mode", devProp.computeMode);
-    num("hdp_clock_instruction_rate", devProp.clockInstructionRate);
-    num("hdp_concurrent_kernels", devProp.concurrentKernels);
-    num("hdp_pci_domain_id", devProp.pciDomainID);
-    num("hdp_pci_bus_id", devProp.pciBusID);
-    num("hdp_pci_device_id", devProp.pciDeviceID);
-    num("hdp_max_shared_memory_per_multi_processor", devProp.maxSharedMemoryPerMultiProcessor);
-    num("hdp_is_multi_gpu_board", devProp.isMultiGpuBoard);
-    num("hdp_can_map_host_memory", devProp.canMapHostMemory);
-    str("hdp_gcn_arch_name", devProp.gcnArchName);
-    num("hdp_integrated", devProp.integrated);
-    num("hdp_cooperative_launch", devProp.cooperativeLaunch);
-    num("hdp_cooperative_multi_device_launch", devProp.cooperativeMultiDeviceLaunch);
-    num("hdp_max_texture_1d_linear", devProp.maxTexture1DLinear);
-    num("hdp_max_texture_1d", devProp.maxTexture1D);
-    dim2("hdp_max_texture_2d", devProp.maxTexture2D);
-    dim3("hdp_max_texture_3d", devProp.maxTexture3D);
-    num("hdp_mem_pitch", devProp.memPitch);
-    num("hdp_texture_alignment", devProp.textureAlignment);
-    num("hdp_texture_pitch_alignment", devProp.texturePitchAlignment);
-    num("hdp_kernel_exec_timeout_enabled", devProp.kernelExecTimeoutEnabled);
-    num("hdp_ecc_enabled", devProp.ECCEnabled);
-    num("hdp_tcc_driver", devProp.tccDriver);
-    num("hdp_cooperative_multi_device_unmatched_func", devProp.cooperativeMultiDeviceUnmatchedFunc);
-    num("hdp_cooperative_multi_device_unmatched_grid_dim", devProp.cooperativeMultiDeviceUnmatchedGridDim);
-    num("hdp_cooperative_multi_device_unmatched_block_dim", devProp.cooperativeMultiDeviceUnmatchedBlockDim);
-    num("hdp_cooperative_multi_device_unmatched_shared_mem", devProp.cooperativeMultiDeviceUnmatchedSharedMem);
-    num("hdp_is_large_bar", devProp.isLargeBar);
-    num("hdp_asic_revision", devProp.asicRevision);
-    num("hdp_managed_memory", devProp.managedMemory);
-    num("hdp_direct_managed_mem_access_from_host", devProp.directManagedMemAccessFromHost);
-    num("hdp_concurrent_managed_access", devProp.concurrentManagedAccess);
-    num("hdp_pageable_memory_access", devProp.pageableMemoryAccess);
-    num("hdp_pageable_memory_access_uses_host_page_tables", devProp.pageableMemoryAccessUsesHostPageTables);
-
-    const auto arch = devProp.arch;
-    num("hdp_arch_has_global_int32_atomics", arch.hasGlobalInt32Atomics);
-    num("hdp_arch_has_global_float_atomic_exch", arch.hasGlobalFloatAtomicExch);
-    num("hdp_arch_has_shared_int32_atomics", arch.hasSharedInt32Atomics);
-    num("hdp_arch_has_shared_float_atomic_exch", arch.hasSharedFloatAtomicExch);
-    num("hdp_arch_has_float_atomic_add", arch.hasFloatAtomicAdd);
-    num("hdp_arch_has_global_int64_atomics", arch.hasGlobalInt64Atomics);
-    num("hdp_arch_has_shared_int64_atomics", arch.hasSharedInt64Atomics);
-    num("hdp_arch_has_doubles", arch.hasDoubles);
-    num("hdp_arch_has_warp_vote", arch.hasWarpVote);
-    num("hdp_arch_has_warp_ballot", arch.hasWarpBallot);
-    num("hdp_arch_has_warp_shuffle", arch.hasWarpShuffle);
-    num("hdp_arch_has_funnel_shift", arch.hasFunnelShift);
-    num("hdp_arch_has_thread_fence_system", arch.hasThreadFenceSystem);
-    num("hdp_arch_has_sync_threads_ext", arch.hasSyncThreadsExt);
-    num("hdp_arch_has_surface_funcs", arch.hasSurfaceFuncs);
-    num("hdp_arch_has_3d_grid", arch.has3dGrid);
-    num("hdp_arch_has_dynamic_parallelism", arch.hasDynamicParallelism);
+    return "rocprim::int128_t";
+}
+template<>
+inline const char* Traits<rocprim::uint128_t>::name()
+{
+    return "rocprim::uint128_t";
+}
+template<>
+inline const char* Traits<common::custom_type_copyable<char, double>>::name()
+{
+    return "common::custom_type_copyable<char,double>";
+}
+template<>
+inline const char* Traits<common::custom_type_copyable<double, double>>::name()
+{
+    return "common::custom_type_copyable<double,double>";
 }
 
 inline const char* get_block_scan_algorithm_name(rocprim::block_scan_algorithm alg)
@@ -1165,6 +959,22 @@ inline const char* get_block_load_method_name(rocprim::block_load_method method)
     return "default_method";
 }
 
+inline const char* get_thread_load_method_name(rocprim::cache_load_modifier method)
+{
+    switch(method)
+    {
+        case rocprim::load_default: return "load_default";
+        case rocprim::load_ca: return "load_ca";
+        case rocprim::load_cg: return "load_cg";
+        case rocprim::load_nontemporal: return "load_nontemporal";
+        case rocprim::load_cv: return "load_cv";
+        case rocprim::load_ldg: return "load_ldg";
+        case rocprim::load_volatile: return "load_volatile";
+        case rocprim::load_count: return "load_count";
+    }
+    return "load_default";
+}
+
 template<std::size_t Size, std::size_t Alignment>
 struct alignas(Alignment) custom_aligned_type
 {
@@ -1184,5 +994,579 @@ inline std::string partition_config_name<rocprim::default_config>()
 {
     return "default_config";
 }
+
+namespace benchmark_utils
+{
+
+constexpr size_t KiB = 1024;
+constexpr size_t MiB = 1024 * KiB;
+constexpr size_t GiB = 1024 * MiB;
+
+class state
+{
+public:
+    state(hipStream_t         stream,
+          size_t              size,
+          const managed_seed& seed,
+          size_t              batch_iterations,
+          benchmark::State&   gbench_state,
+          size_t              warmup_iterations,
+          bool                cold,
+          bool                record_as_whole)
+        : stream(stream)
+        , size(size)
+        , bytes(size)
+        , seed(seed)
+        , batch_iterations(batch_iterations)
+        , gbench_state(gbench_state)
+        , warmup_iterations(warmup_iterations)
+        , cold(cold)
+        , record_as_whole(record_as_whole)
+        , events(record_as_whole ? 2 : batch_iterations * 2)
+    {}
+
+    // Used to reset the input array of algorithms like device_merge_inplace.
+    void run_before_every_iteration(std::function<void()> lambda)
+    {
+        run_before_every_iteration_lambda = lambda;
+    }
+
+    // Used to accumulate the results of state.run() calls.
+    void accumulate_total_gbench_iterations_every_run()
+    {
+        reset_total_gbench_iterations_every_run = false;
+    }
+
+    void run(std::function<void()> kernel)
+    {
+        for(auto& event : events)
+        {
+            HIP_CHECK(hipEventCreate(&event));
+        }
+
+        // Warm-up
+        for(size_t i = 0; i < warmup_iterations; ++i)
+        {
+            // Benchmarks may expect their kernel input to be prepared by this lambda,
+            // so to prevent any potential crashes, we call the lambda during warm-up.
+            if(run_before_every_iteration_lambda)
+            {
+                run_before_every_iteration_lambda();
+            }
+
+            kernel();
+        }
+        HIP_CHECK(hipDeviceSynchronize());
+
+        if(run_before_every_iteration_lambda && batch_iterations > 1 && record_as_whole)
+        {
+            std::cerr << "Error: This benchmark calls run_before_every_iteration() and has a "
+                         "batch_iterations count that is higher than 1, which means it does not "
+                         "support using --record_as_whole.\n";
+            exit(EXIT_FAILURE);
+        }
+
+        // Run
+        for(auto _ : gbench_state)
+        {
+            if(record_as_whole)
+            {
+                if(run_before_every_iteration_lambda)
+                {
+                    run_before_every_iteration_lambda();
+                }
+
+                HIP_CHECK(hipEventRecord(events[0], stream));
+                for(size_t i = 0; i < batch_iterations; ++i)
+                {
+                    kernel();
+                }
+                HIP_CHECK(hipEventRecord(events[1], stream));
+                HIP_CHECK(hipEventSynchronize(events[1]));
+
+                float elapsed_mseconds;
+                HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, events[0], events[1]));
+                times.emplace_back(elapsed_mseconds);
+                gbench_state.SetIterationTime(elapsed_mseconds / 1000);
+            }
+            else
+            {
+                for(size_t i = 0; i < batch_iterations; ++i)
+                {
+                    if(run_before_every_iteration_lambda)
+                    {
+                        run_before_every_iteration_lambda();
+                    }
+
+                    if(cold)
+                    {
+                        clear_gpu_cache(stream);
+                    }
+
+                    // Even events record the start time.
+                    HIP_CHECK(hipEventRecord(events[i * 2], stream));
+
+                    kernel();
+
+                    // Odd events record the stop time.
+                    HIP_CHECK(hipEventRecord(events[i * 2 + 1], stream));
+                }
+
+                // Wait until the last record event has completed.
+                HIP_CHECK(hipEventSynchronize(events[batch_iterations * 2 - 1]));
+
+                // Accumulate the total elapsed time.
+                double elapsed_mseconds = 0.0;
+                for(size_t i = 0; i < batch_iterations; i++)
+                {
+                    float iteration_mseconds;
+                    HIP_CHECK(
+                        hipEventElapsedTime(&iteration_mseconds, events[i * 2], events[i * 2 + 1]));
+                    times.emplace_back(iteration_mseconds);
+                    elapsed_mseconds += iteration_mseconds;
+                }
+                gbench_state.SetIterationTime(elapsed_mseconds / 1000);
+            }
+        }
+
+        if(reset_total_gbench_iterations_every_run)
+        {
+            total_gbench_iterations = 0;
+        }
+        total_gbench_iterations += gbench_state.iterations();
+
+        for(const auto& event : events)
+        {
+            HIP_CHECK(hipEventDestroy(event));
+        }
+    }
+
+    void set_throughput(size_t actual_size, size_t type_size)
+    {
+        if(has_set_throughput)
+        {
+            std::cerr << "Error: Benchmarks should only ever call set_throughput() once, at the "
+                         "very end.\n";
+            exit(EXIT_FAILURE);
+        }
+        has_set_throughput = true;
+
+        gbench_state.SetBytesProcessed(total_gbench_iterations * batch_iterations * actual_size
+                                       * type_size);
+        gbench_state.SetItemsProcessed(total_gbench_iterations * batch_iterations * actual_size);
+
+        output_statistics();
+    }
+
+    hipStream_t       stream;
+    size_t            size;
+    size_t            bytes;
+    managed_seed      seed;
+    size_t            batch_iterations;
+    benchmark::State& gbench_state;
+
+private:
+    // Zeros a 256 MiB buffer, used to clear the cache before each kernel call.
+    // 256 MiB is the size of the largest cache on any AMD GPU.
+    // It is currently not possible to fetch the L3 cache size from the runtime.
+    inline void clear_gpu_cache(hipStream_t stream)
+    {
+        constexpr size_t buf_size = 256 * MiB;
+        static void*     buf      = nullptr;
+        if(!buf)
+        {
+            HIP_CHECK(hipMalloc(&buf, buf_size));
+        }
+        HIP_CHECK(hipMemsetAsync(buf, 0, buf_size, stream));
+    }
+
+    void output_statistics()
+    {
+        double mean   = get_mean();
+        double median = get_median();
+        double stddev = get_stddev(mean);
+        double cv     = get_cv(stddev, mean);
+
+        gbench_state.counters["mean"]   = mean;
+        gbench_state.counters["median"] = median;
+        gbench_state.counters["stddev"] = stddev;
+        gbench_state.counters["cv"]     = cv;
+    }
+
+    double get_mean()
+    {
+        return std::reduce(times.begin(), times.end()) / times.size();
+    }
+
+    // Technically when times.size() is even, the median is the arithmetic mean
+    // of the elements k=N/2 and k=N/2+1. This would be overkill here,
+    // as times.size() is large enough, and recorded times are similar enough.
+    double get_median()
+    {
+        size_t center_index = times.size() / 2;
+        std::nth_element(times.begin(), times.begin() + center_index, times.end());
+        return times[center_index];
+    }
+
+    double get_stddev(double mean)
+    {
+        auto SumSquares = [](const std::vector<double>& v)
+        { return std::transform_reduce(v.begin(), v.end(), v.begin(), 0.0); };
+        auto Sqr  = [](double dat) { return dat * dat; };
+        auto Sqrt = [](double dat) { return dat < 0.0 ? 0.0 : std::sqrt(dat); };
+
+        double stddev = 0.0;
+        if(times.size() > 1)
+        {
+            double avg_squares = SumSquares(times) * (1.0 / times.size());
+            stddev = Sqrt(times.size() / (times.size() - 1.0) * (avg_squares - Sqr(mean)));
+        }
+        return stddev;
+    }
+
+    double get_cv(double stddev, double mean)
+    {
+        return times.size() >= 2 ? stddev / mean : 0.0;
+    }
+
+    size_t warmup_iterations;
+    bool   cold;
+    bool   record_as_whole;
+
+    std::vector<hipEvent_t> events;
+    std::function<void()>   run_before_every_iteration_lambda       = nullptr;
+    size_t                  total_gbench_iterations                 = 0;
+    bool                    reset_total_gbench_iterations_every_run = true;
+    std::vector<double>     times;
+    bool                    has_set_throughput = false;
+};
+
+struct autotune_interface
+{
+    virtual std::string name() const = 0;
+    virtual std::string sort_key() const
+    {
+        return name();
+    };
+    virtual ~autotune_interface()   = default;
+    virtual void run(state&& state) = 0;
+};
+
+class executor
+{
+public:
+    executor(int    argc,
+             char*  argv[],
+             size_t default_bytes,
+             size_t default_batch_iterations,
+             size_t default_warmup_iterations,
+             bool   default_cold   = true,
+             int    default_trials = -1)
+    {
+        cli::Parser parser(argc, argv);
+
+        set_optional_parser_flags(parser,
+                                  default_bytes,
+                                  default_batch_iterations,
+                                  default_warmup_iterations,
+                                  default_cold,
+                                  default_trials);
+
+        parser.run_and_exit_if_error();
+
+        benchmark::Initialize(&argc, argv);
+
+        parse(parser);
+
+        add_context();
+    }
+
+    template<typename T>
+    void queue_fn(const std::string& name, T bench_fn)
+    {
+        apply_settings(benchmark::RegisterBenchmark(name.c_str(),
+                                                    [=](benchmark::State& gbench_state)
+                                                    { bench_fn(new_state(gbench_state)); }));
+    }
+
+    template<typename Benchmark>
+    void queue_instance(Benchmark&& instance)
+    {
+        apply_settings(benchmark::RegisterBenchmark(
+            instance.name().c_str(),
+            [=](benchmark::State& gbench_state)
+            {
+                // run() requires a mutable instance, so create a mutable copy.
+                // Using [&instance] doesn't work, as it creates a dangling reference at runtime.
+                // Marking the lambda mutable doesn't work, as the &&instance it copies is const.
+                Benchmark(std::move(instance)).run(new_state(gbench_state));
+            }));
+    }
+
+    template<typename Benchmark>
+    static bool queue_sorted_instance()
+    {
+        sorted_benchmarks().push_back(std::make_unique<Benchmark>());
+        return true; // Must return something, as this function gets called in global scope.
+    }
+
+    template<typename BulkCreateFunction>
+    static bool queue_autotune(BulkCreateFunction&& f)
+    {
+        std::forward<BulkCreateFunction>(f)(sorted_benchmarks());
+        return true; // Must return something, as this function gets called in global scope.
+    }
+
+    void run()
+    {
+        register_sorted_subset(parallel_instance, parallel_instances);
+        benchmark::RunSpecifiedBenchmarks();
+    }
+
+private:
+    void set_optional_parser_flags(cli::Parser& parser,
+                                   size_t       default_bytes,
+                                   size_t       default_batch_iterations,
+                                   size_t       default_warmup_iterations,
+                                   bool         default_cold,
+                                   int          default_trials)
+    {
+        parser.set_optional<size_t>("size", "size", default_bytes, "size in bytes");
+        parser.set_optional<size_t>("batch_iterations",
+                                    "batch_iterations",
+                                    default_batch_iterations,
+                                    "number of batch iterations");
+        parser.set_optional<size_t>("warmup_iterations",
+                                    "warmup_iterations",
+                                    default_warmup_iterations,
+                                    "number of warmup iterations");
+        parser.set_optional<bool>("hot",
+                                  "hot",
+                                  !default_cold,
+                                  "don't clear the gpu cache on every batch iteration");
+        parser.set_optional<bool>(
+            "record_as_whole",
+            "record_as_whole",
+            false,
+            "record the batch iterations as a whole, at the very start and end, which necessitates "
+            "that gpu cache clearing between iterations can't be done");
+
+        parser.set_optional<std::string>("seed", "seed", "random", get_seed_message());
+        parser.set_optional<int>("trials", "trials", default_trials, "number of iterations");
+        parser.set_optional<std::string>("name_format",
+                                         "name_format",
+                                         "json",
+                                         "either json, human, or txt");
+
+        // Optionally run an evenly split subset of benchmarks for autotuning.
+        parser.set_optional<int>("parallel_instance",
+                                 "parallel_instance",
+                                 0,
+                                 "parallel instance index");
+        parser.set_optional<int>("parallel_instances",
+                                 "parallel_instances",
+                                 1,
+                                 "total parallel instances");
+    }
+
+    void parse(cli::Parser& parser)
+    {
+        size = parser.get<size_t>("size");
+
+        seed_type = parser.get<std::string>("seed");
+
+        seed = managed_seed(seed_type);
+
+        batch_iterations  = parser.get<size_t>("batch_iterations");
+        warmup_iterations = parser.get<size_t>("warmup_iterations");
+
+        cold            = !parser.get<bool>("hot");
+        record_as_whole = parser.get<bool>("record_as_whole");
+
+        trials             = parser.get<int>("trials");
+        parallel_instance  = parser.get<int>("parallel_instance");
+        parallel_instances = parser.get<int>("parallel_instances");
+
+        bench_naming::set_format(parser.get<std::string>("name_format"));
+    }
+
+    void add_context()
+    {
+        benchmark::AddCustomContext("size", std::to_string(size));
+        benchmark::AddCustomContext("seed", seed_type);
+
+        benchmark::AddCustomContext("batch_iterations", std::to_string(batch_iterations));
+        benchmark::AddCustomContext("warmup_iterations", std::to_string(warmup_iterations));
+
+        hipDeviceProp_t devProp;
+        int             device_id = 0;
+        HIP_CHECK(hipGetDevice(&device_id));
+        HIP_CHECK(hipGetDeviceProperties(&devProp, device_id));
+
+        auto str = [](const std::string& name, const std::string& val)
+        { benchmark::AddCustomContext(name, val); };
+
+        auto num = [](const std::string& name, const auto& value)
+        { benchmark::AddCustomContext(name, std::to_string(value)); };
+
+        auto dim2 = [num](const std::string& name, const auto* values)
+        {
+            num(name + "_x", values[0]);
+            num(name + "_y", values[1]);
+        };
+
+        auto dim3 = [num, dim2](const std::string& name, const auto* values)
+        {
+            dim2(name, values);
+            num(name + "_z", values[2]);
+        };
+
+        str("hdp_name", devProp.name);
+        num("hdp_total_global_mem", devProp.totalGlobalMem);
+        num("hdp_shared_mem_per_block", devProp.sharedMemPerBlock);
+        num("hdp_regs_per_block", devProp.regsPerBlock);
+        num("hdp_warp_size", devProp.warpSize);
+        num("hdp_max_threads_per_block", devProp.maxThreadsPerBlock);
+        dim3("hdp_max_threads_dim", devProp.maxThreadsDim);
+        dim3("hdp_max_grid_size", devProp.maxGridSize);
+        num("hdp_clock_rate", devProp.clockRate);
+        num("hdp_memory_clock_rate", devProp.memoryClockRate);
+        num("hdp_memory_bus_width", devProp.memoryBusWidth);
+        num("hdp_total_const_mem", devProp.totalConstMem);
+        num("hdp_major", devProp.major);
+        num("hdp_minor", devProp.minor);
+        num("hdp_multi_processor_count", devProp.multiProcessorCount);
+        num("hdp_l2_cache_size", devProp.l2CacheSize);
+        num("hdp_max_threads_per_multiprocessor", devProp.maxThreadsPerMultiProcessor);
+        num("hdp_compute_mode", devProp.computeMode);
+        num("hdp_clock_instruction_rate", devProp.clockInstructionRate);
+        num("hdp_concurrent_kernels", devProp.concurrentKernels);
+        num("hdp_pci_domain_id", devProp.pciDomainID);
+        num("hdp_pci_bus_id", devProp.pciBusID);
+        num("hdp_pci_device_id", devProp.pciDeviceID);
+        num("hdp_max_shared_memory_per_multi_processor", devProp.maxSharedMemoryPerMultiProcessor);
+        num("hdp_is_multi_gpu_board", devProp.isMultiGpuBoard);
+        num("hdp_can_map_host_memory", devProp.canMapHostMemory);
+        str("hdp_gcn_arch_name", devProp.gcnArchName);
+        num("hdp_integrated", devProp.integrated);
+        num("hdp_cooperative_launch", devProp.cooperativeLaunch);
+        num("hdp_cooperative_multi_device_launch", devProp.cooperativeMultiDeviceLaunch);
+        num("hdp_max_texture_1d_linear", devProp.maxTexture1DLinear);
+        num("hdp_max_texture_1d", devProp.maxTexture1D);
+        dim2("hdp_max_texture_2d", devProp.maxTexture2D);
+        dim3("hdp_max_texture_3d", devProp.maxTexture3D);
+        num("hdp_mem_pitch", devProp.memPitch);
+        num("hdp_texture_alignment", devProp.textureAlignment);
+        num("hdp_texture_pitch_alignment", devProp.texturePitchAlignment);
+        num("hdp_kernel_exec_timeout_enabled", devProp.kernelExecTimeoutEnabled);
+        num("hdp_ecc_enabled", devProp.ECCEnabled);
+        num("hdp_tcc_driver", devProp.tccDriver);
+        num("hdp_cooperative_multi_device_unmatched_func",
+            devProp.cooperativeMultiDeviceUnmatchedFunc);
+        num("hdp_cooperative_multi_device_unmatched_grid_dim",
+            devProp.cooperativeMultiDeviceUnmatchedGridDim);
+        num("hdp_cooperative_multi_device_unmatched_block_dim",
+            devProp.cooperativeMultiDeviceUnmatchedBlockDim);
+        num("hdp_cooperative_multi_device_unmatched_shared_mem",
+            devProp.cooperativeMultiDeviceUnmatchedSharedMem);
+        num("hdp_is_large_bar", devProp.isLargeBar);
+        num("hdp_asic_revision", devProp.asicRevision);
+        num("hdp_managed_memory", devProp.managedMemory);
+        num("hdp_direct_managed_mem_access_from_host", devProp.directManagedMemAccessFromHost);
+        num("hdp_concurrent_managed_access", devProp.concurrentManagedAccess);
+        num("hdp_pageable_memory_access", devProp.pageableMemoryAccess);
+        num("hdp_pageable_memory_access_uses_host_page_tables",
+            devProp.pageableMemoryAccessUsesHostPageTables);
+
+        const auto arch = devProp.arch;
+        num("hdp_arch_has_global_int32_atomics", arch.hasGlobalInt32Atomics);
+        num("hdp_arch_has_global_float_atomic_exch", arch.hasGlobalFloatAtomicExch);
+        num("hdp_arch_has_shared_int32_atomics", arch.hasSharedInt32Atomics);
+        num("hdp_arch_has_shared_float_atomic_exch", arch.hasSharedFloatAtomicExch);
+        num("hdp_arch_has_float_atomic_add", arch.hasFloatAtomicAdd);
+        num("hdp_arch_has_global_int64_atomics", arch.hasGlobalInt64Atomics);
+        num("hdp_arch_has_shared_int64_atomics", arch.hasSharedInt64Atomics);
+        num("hdp_arch_has_doubles", arch.hasDoubles);
+        num("hdp_arch_has_warp_vote", arch.hasWarpVote);
+        num("hdp_arch_has_warp_ballot", arch.hasWarpBallot);
+        num("hdp_arch_has_warp_shuffle", arch.hasWarpShuffle);
+        num("hdp_arch_has_funnel_shift", arch.hasFunnelShift);
+        num("hdp_arch_has_thread_fence_system", arch.hasThreadFenceSystem);
+        num("hdp_arch_has_sync_threads_ext", arch.hasSyncThreadsExt);
+        num("hdp_arch_has_surface_funcs", arch.hasSurfaceFuncs);
+        num("hdp_arch_has_3d_grid", arch.has3dGrid);
+        num("hdp_arch_has_dynamic_parallelism", arch.hasDynamicParallelism);
+    }
+
+    static std::vector<std::unique_ptr<autotune_interface>>& sorted_benchmarks()
+    {
+        static std::vector<std::unique_ptr<autotune_interface>> sorted_benchmarks;
+        return sorted_benchmarks;
+    }
+
+    state new_state(benchmark::State& gbench_state)
+    {
+        return state(stream,
+                     size,
+                     seed,
+                     batch_iterations,
+                     gbench_state,
+                     warmup_iterations,
+                     cold,
+                     record_as_whole);
+    }
+
+    void apply_settings(benchmark::internal::Benchmark* b)
+    {
+        b->UseManualTime();
+        b->Unit(benchmark::kMillisecond);
+
+        // trials is -1 by default.
+        if(trials > 0)
+        {
+            b->Iterations(trials);
+        }
+    }
+
+    // Register a subset of all benchmarks for the current parallel instance.
+    void register_sorted_subset(int parallel_instance_index, int parallel_instance_count)
+    {
+        // Sort to get a consistent order, because the order of static variable initialization is undefined by the C++ standard.
+        std::sort(sorted_benchmarks().begin(),
+                  sorted_benchmarks().end(),
+                  [](const auto& l, const auto& r) { return l->sort_key() < r->sort_key(); });
+
+        size_t configs_per_instance
+            = (sorted_benchmarks().size() + parallel_instance_count - 1) / parallel_instance_count;
+        size_t start
+            = std::min(parallel_instance_index * configs_per_instance, sorted_benchmarks().size());
+        size_t end = std::min((parallel_instance_index + 1) * configs_per_instance,
+                              sorted_benchmarks().size());
+
+        for(size_t i = start; i < end; ++i)
+        {
+            autotune_interface* benchmark = sorted_benchmarks().at(i).get();
+
+            apply_settings(benchmark::RegisterBenchmark(
+                benchmark->name().c_str(),
+                [=](benchmark::State& gbench_state) { benchmark->run(new_state(gbench_state)); }));
+        }
+    }
+
+    hipStream_t  stream = hipStreamDefault;
+    size_t       size;
+    std::string  seed_type;
+    managed_seed seed;
+    size_t       batch_iterations;
+    size_t       warmup_iterations;
+    bool         cold;
+    bool         record_as_whole;
+
+    int trials;
+    int parallel_instance;
+    int parallel_instances;
+};
+
+} // namespace benchmark_utils
 
 #endif // ROCPRIM_BENCHMARK_UTILS_HPP_

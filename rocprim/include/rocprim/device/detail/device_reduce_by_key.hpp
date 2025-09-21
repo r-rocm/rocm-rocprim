@@ -48,9 +48,8 @@ namespace reduce_by_key
 {
 
 template<typename ValueIterator, typename BinaryOp>
-using accumulator_type_t =
-    typename invoke_result_binary_op<::rocprim::detail::value_type_t<ValueIterator>,
-                                     BinaryOp>::type;
+using accumulator_type_t
+    = ::rocprim::accumulator_t<BinaryOp, ::rocprim::detail::value_type_t<ValueIterator>>;
 
 template<typename AccumulatorType>
 using wrapped_type_t = rocprim::tuple<unsigned int, AccumulatorType>;
@@ -85,19 +84,20 @@ struct load_helper
     };
 
     template<typename KeyIterator, typename ValueIterator>
-    ROCPRIM_DEVICE void load_keys_values(KeyIterator        tile_keys,
-                                         ValueIterator      tile_values,
-                                         const bool         is_global_last_tile,
-                                         const unsigned int valid_in_global_last_tile,
-                                         KeyType (&keys)[ItemsPerThread],
-                                         AccumulatorType (&values)[ItemsPerThread],
-                                         storage_type& storage)
+    ROCPRIM_DEVICE
+    void load_keys_values(KeyIterator        tile_keys,
+                          ValueIterator      tile_values,
+                          const bool         is_global_last_tile,
+                          const unsigned int valid_in_global_last_tile,
+                          KeyType (&keys)[ItemsPerThread],
+                          AccumulatorType (&values)[ItemsPerThread],
+                          storage_type& storage)
     {
 
         if(!is_global_last_tile)
         {
             block_load_keys{}.load(tile_keys, keys, storage.keys);
-            if ROCPRIM_IF_CONSTEXPR(requires_inner_sync)
+            if constexpr(requires_inner_sync)
             {
                 ::rocprim::syncthreads();
             }
@@ -106,7 +106,7 @@ struct load_helper
         else
         {
             block_load_keys{}.load(tile_keys, keys, valid_in_global_last_tile, storage.keys);
-            if ROCPRIM_IF_CONSTEXPR(requires_inner_sync)
+            if constexpr(requires_inner_sync)
             {
                 ::rocprim::syncthreads();
             }
@@ -125,14 +125,15 @@ struct discontinuity_helper
     using storage_type             = typename block_discontinuity_type::storage_type;
 
     template<typename KeyIterator, typename CompareFunction, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE void flag_heads(KeyIterator tile_keys,
-                                   const KeyType (&keys)[ItemsPerThread],
-                                   CompareFunction compare,
-                                   unsigned int (&head_flags)[ItemsPerThread],
-                                   const bool    is_global_first_tile,
-                                   const bool    is_global_last_tile,
-                                   const size_t  remaining,
-                                   storage_type& storage)
+    ROCPRIM_DEVICE
+    void flag_heads(KeyIterator tile_keys,
+                    const KeyType (&keys)[ItemsPerThread],
+                    CompareFunction compare,
+                    unsigned int (&head_flags)[ItemsPerThread],
+                    const bool    is_global_first_tile,
+                    const bool    is_global_last_tile,
+                    const size_t  remaining,
+                    storage_type& storage)
     {
         if(is_global_last_tile)
         {
@@ -184,24 +185,60 @@ struct scatter_helper
     ROCPRIM_DETAIL_SUPPRESS_DEPRECATION_POP
 
     template<typename ValueIterator, typename Flag, typename ValueFunction, typename IndexFunction>
-    ROCPRIM_DEVICE void scatter(ValueIterator   tile_values,
-                                ValueFunction&& values,
-                                const Flag (&is_selected)[ItemsPerThread],
-                                IndexFunction&&    block_indices,
-                                const unsigned int selected_in_tile,
-                                const unsigned int flat_thread_id,
-                                storage_type&      storage)
+    ROCPRIM_DEVICE
+    void scatter(ValueIterator   tile_values,
+                 ValueFunction&& values,
+                 const Flag (&is_selected)[ItemsPerThread],
+                 IndexFunction&&    block_indices,
+                 const unsigned int selected_in_tile,
+                 const unsigned int flat_thread_id,
+                 storage_type&      storage)
     {
+        // Check if all threads in the warp are selecting the same location (selected or rejected)
+        uint8_t all_check = 3; // [true, true]
+        for(unsigned int i = 0; i < ItemsPerThread; ++i)
+        {
+            all_check &= is_selected[i] ? 1 /* [false, true] */ : 2 /* [true, false] */;
+        }
+        // all_check:
+        //   0: mixed selection
+        //   1: all selected
+        //   2: all rejected
+        //   3: impossible
+
+        // If selected_in_tile >= BlockSize, use shared memory for storing scattered data
         if(selected_in_tile >= BlockSize)
         {
             auto& scatter_storage = storage.get();
-            for(unsigned int i = 0; i < ItemsPerThread; ++i)
+
+            // If all threads in the warp are storing to the same location, we can skip the conditional
+            if(all_check == 1)
             {
-                if(is_selected[i])
+                // Perform the scatter directly for selected items
+                ROCPRIM_UNROLL
+                for(unsigned int i = 0; i < ItemsPerThread; ++i)
                 {
                     scatter_storage[block_indices(i)] = values(i);
                 }
             }
+            else if(all_check == 2)
+            {
+                // If all threads reject, we can skip doing any work for the selected items
+                // (nothing to store to the scatter storage)
+            }
+            else
+            {
+                // Otherwise, process each item individually
+                ROCPRIM_UNROLL
+                for(unsigned int i = 0; i < ItemsPerThread; ++i)
+                {
+                    if(is_selected[i])
+                    {
+                        scatter_storage[block_indices(i)] = values(i);
+                    }
+                }
+            }
+
             ::rocprim::syncthreads();
 
             // Coalesced write from shared memory to global memory
@@ -212,11 +249,30 @@ struct scatter_helper
         }
         else
         {
-            for(unsigned int i = 0; i < ItemsPerThread; ++i)
+            // When selected_in_tile < BlockSize, store directly to global memory
+            if(all_check == 1)
             {
-                if(is_selected[i])
+                // Directly store all values since they are all selected
+                ROCPRIM_UNROLL
+                for(unsigned int i = 0; i < ItemsPerThread; ++i)
                 {
                     tile_values[block_indices(i)] = values(i);
+                }
+            }
+            else if(all_check == 2)
+            {
+                // If all are rejected, do nothing
+            }
+            else
+            {
+                // Process selected items
+                ROCPRIM_UNROLL
+                for(unsigned int i = 0; i < ItemsPerThread; ++i)
+                {
+                    if(is_selected[i])
+                    {
+                        tile_values[block_indices(i)] = values(i);
+                    }
                 }
             }
         }

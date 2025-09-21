@@ -2,11 +2,11 @@
   :description: rocPRIM documentation and API reference library
   :keywords: rocPRIM, ROCm, API, documentation
 
-.. _radix-key-codec:
+.. _blk-run_length_decode:
 
 ********************************************************************
- Radix Key Encoder/Decoder
+ Run-length decode
 ********************************************************************
 
-.. doxygenclass:: rocprim::radix_key_codec
+.. doxygenclass:: rocprim::block_run_length_decode
    :members:

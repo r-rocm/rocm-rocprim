@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,11 +20,16 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "common_test_header.hpp"
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_device_ptr.hpp"
 
 #include <rocprim/detail/temp_storage.hpp>
+#include <rocprim/detail/various.hpp>
 
-#include "test_utils_types.hpp"
+#include <algorithm>
+#include <cstddef>
 
 namespace rpts = rocprim::detail::temp_storage;
 
@@ -58,15 +63,12 @@ TEST(RocprimTemporaryStoragePartitioningTests, Basic)
     ASSERT_EQ(result, hipSuccess);
     ASSERT_EQ(storage_size, size);
 
-    void* temporary_storage;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
-    result = partition(temporary_storage, storage_size);
+    result = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipSuccess);
     ASSERT_EQ(storage_size, size);
-    ASSERT_EQ(test_allocation, temporary_storage);
-
-    HIP_CHECK(hipFree(temporary_storage));
+    ASSERT_EQ(test_allocation, (decltype(test_allocation))temporary_storage.get());
 }
 
 TEST(RocprimTemporaryStoragePartitioningTests, ZeroSizePartition)
@@ -89,14 +91,11 @@ TEST(RocprimTemporaryStoragePartitioningTests, ZeroSizePartition)
     ASSERT_EQ(result, hipSuccess);
     ASSERT_NE(storage_size, 0);
 
-    void* temporary_storage;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
-    result = partition(temporary_storage, storage_size);
+    result = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipSuccess);
     ASSERT_EQ(test_allocation, nullptr);
-
-    HIP_CHECK(hipFree(temporary_storage));
 }
 
 TEST(RocprimTemporaryStoragePartitioningTests, ZeroSizePartitionInsufficientAllocation)
@@ -116,14 +115,11 @@ TEST(RocprimTemporaryStoragePartitioningTests, ZeroSizePartitionInsufficientAllo
     ASSERT_EQ(result, hipSuccess);
     ASSERT_NE(storage_size, 0);
 
-    void* temporary_storage;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
     storage_size = 0;
-    result       = partition(temporary_storage, storage_size);
+    result       = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipErrorInvalidValue);
-
-    HIP_CHECK(hipFree(temporary_storage));
 }
 
 TEST(RocprimTemporaryStoragePartitioningTests, Sequence)
@@ -132,7 +128,7 @@ TEST(RocprimTemporaryStoragePartitioningTests, Sequence)
     constexpr rpts::layout layout_b   = {10, 8};
     constexpr rpts::layout layout_c   = {100, 32};
     constexpr size_t       elements_e = 17;
-    using type_e                      = test_utils::custom_test_type<double>;
+    using type_e                      = common::custom_type<double, double, true>;
 
     hipError_t result;
 
@@ -167,24 +163,22 @@ TEST(RocprimTemporaryStoragePartitioningTests, Sequence)
     const size_t expected_size = expected_offset_e + elements_e * sizeof(type_e);
     ASSERT_EQ(storage_size, expected_size);
 
-    void* temporary_storage;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
-    result = partition(temporary_storage, storage_size);
+    result = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipSuccess);
-    ASSERT_EQ(test_allocation_a, temporary_storage);
-    ASSERT_EQ(test_allocation_b, displace_ptr(temporary_storage, expected_offset_b));
-    ASSERT_EQ(test_allocation_c, displace_ptr(temporary_storage, expected_offset_c));
+    ASSERT_EQ(test_allocation_a, (decltype(test_allocation_a))temporary_storage.get());
+    ASSERT_EQ(test_allocation_b, displace_ptr(temporary_storage.get(), expected_offset_b));
+    ASSERT_EQ(test_allocation_c, displace_ptr(temporary_storage.get(), expected_offset_c));
     ASSERT_EQ(test_allocation_d, nullptr);
-    ASSERT_EQ(test_allocation_e, displace_ptr(temporary_storage, expected_offset_e));
+    ASSERT_EQ(test_allocation_e, displace_ptr(temporary_storage.get(), expected_offset_e));
 
+    ASSERT_TRUE(is_aligned_to(displace_ptr(temporary_storage.get(), expected_offset_b),
+                              layout_b.alignment));
+    ASSERT_TRUE(is_aligned_to(displace_ptr(temporary_storage.get(), expected_offset_c),
+                              layout_c.alignment));
     ASSERT_TRUE(
-        is_aligned_to(displace_ptr(temporary_storage, expected_offset_b), layout_b.alignment));
-    ASSERT_TRUE(
-        is_aligned_to(displace_ptr(temporary_storage, expected_offset_c), layout_c.alignment));
-    ASSERT_TRUE(is_aligned_to(displace_ptr(temporary_storage, expected_offset_e), alignof(type_e)));
-
-    HIP_CHECK(hipFree(temporary_storage));
+        is_aligned_to(displace_ptr(temporary_storage.get(), expected_offset_e), alignof(type_e)));
 }
 
 TEST(RocprimTemporaryStoragePartitioningTests, MutuallyExclusive)
@@ -194,7 +188,7 @@ TEST(RocprimTemporaryStoragePartitioningTests, MutuallyExclusive)
 
     constexpr rpts::layout layout_b   = {50, 1};
     constexpr size_t       elements_c = 17;
-    using type_c                      = test_utils::custom_test_type<double>;
+    using type_c                      = common::custom_type<double, double, true>;
 
     hipError_t result;
 
@@ -226,21 +220,18 @@ TEST(RocprimTemporaryStoragePartitioningTests, MutuallyExclusive)
         = expected_offset_bc + std::max(elements_c * sizeof(type_c), layout_b.size);
     ASSERT_EQ(storage_size, expected_size);
 
-    void* temporary_storage;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
-    result = partition(temporary_storage, storage_size);
+    result = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipSuccess);
-    ASSERT_EQ(test_allocation_a, temporary_storage);
-    void* const bc = displace_ptr(temporary_storage, expected_offset_bc);
+    ASSERT_EQ(test_allocation_a, (decltype(test_allocation_a))temporary_storage.get());
+    void* const bc = displace_ptr(temporary_storage.get(), expected_offset_bc);
     ASSERT_EQ(test_allocation_b, bc);
     ASSERT_EQ(test_allocation_c, bc);
     ASSERT_EQ(test_allocation_d, nullptr);
 
     ASSERT_TRUE(is_aligned_to(bc, layout_b.alignment));
     ASSERT_TRUE(is_aligned_to(bc, alignof(type_c)));
-
-    HIP_CHECK(hipFree(temporary_storage));
 }
 
 TEST(RocprimTemporaryStoragePartitioningTests, InsufficientAllocation)
@@ -266,12 +257,9 @@ TEST(RocprimTemporaryStoragePartitioningTests, InsufficientAllocation)
     ASSERT_EQ(result, hipSuccess);
     ASSERT_EQ(storage_size, size * 2);
 
-    void* temporary_storage;
     storage_size -= 1;
-    HIP_CHECK(test_common_utils::hipMallocHelper(&temporary_storage, storage_size));
+    common::device_ptr<void> temporary_storage(storage_size);
 
-    result = partition(temporary_storage, storage_size);
+    result = partition(temporary_storage.get(), storage_size);
     ASSERT_EQ(result, hipErrorInvalidValue);
-
-    HIP_CHECK(hipFree(temporary_storage));
 }

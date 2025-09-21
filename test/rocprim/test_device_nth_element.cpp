@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -20,29 +20,35 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_data_generation.hpp"
+#include "../../common/utils_device_ptr.hpp"
+
 // required test headers
 #include "indirect_iterator.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
 #include "test_utils_assertions.hpp"
 #include "test_utils_custom_float_type.hpp"
 #include "test_utils_custom_test_types.hpp"
 #include "test_utils_data_generation.hpp"
-#include "test_utils_types.hpp"
-
-#include "../common_test_header.hpp"
+#include "test_utils_hipgraphs.hpp"
 
 // required rocprim headers
+#include <rocprim/block/block_radix_rank.hpp>
+#include <rocprim/config.hpp>
 #include <rocprim/device/config_types.hpp>
 #include <rocprim/device/detail/device_config_helper.hpp>
 #include <rocprim/device/device_nth_element.hpp>
 #include <rocprim/functional.hpp>
+#include <rocprim/types.hpp>
 
 #include <algorithm>
-#include <iostream>
-#include <iterator>
-#include <vector>
-
-#include <cassert>
 #include <cstddef>
+#include <stdint.h>
+#include <vector>
 
 // Params for tests
 template<class KeyType,
@@ -62,7 +68,7 @@ struct DeviceNthelementParams
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_cpp_14(InputVector     input,
                            OutputVector    output,
-                           size_t          nth_element,
+                           unsigned int    nth_element,
                            CompareFunction compare_op)
 {
     using key_type = typename InputVector::value_type;
@@ -84,11 +90,10 @@ void inline compare_cpp_14(InputVector     input,
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(sorted_output, sorted_input));
 }
 
-#if CPP17
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare_cpp_17(InputVector     input,
                            OutputVector    output,
-                           size_t          nth_element,
+                           unsigned int    nth_element,
                            CompareFunction compare_op)
 {
     using key_type = typename InputVector::value_type;
@@ -116,21 +121,15 @@ void inline compare_cpp_17(InputVector     input,
 
     ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(sorted_output, sorted_input));
 }
-#endif
 
 template<class InputVector, class OutputVector, class CompareFunction>
 void inline compare(InputVector     input,
                     OutputVector    output,
-                    size_t          nth_element,
+                    unsigned int    nth_element,
                     CompareFunction compare_op)
 {
     compare_cpp_14(input, output, nth_element, compare_op);
-#if CPP17
-    // this comparison is only compiled and executed if c++17 is available
     compare_cpp_17(input, output, nth_element, compare_op);
-#else
-    ROCPRIM_PRAGMA_MESSAGE("c++17 not available skips direct comparison with std::nth_element");
-#endif
 }
 
 // ---------------------------------------------------------
@@ -153,7 +152,7 @@ using RocprimDeviceNthelementTestsParams = ::testing::Types<
     DeviceNthelementParams<unsigned short>,
     DeviceNthelementParams<signed char>,
     DeviceNthelementParams<int>,
-    DeviceNthelementParams<test_utils::custom_test_type<int>>,
+    DeviceNthelementParams<common::custom_type<int, int, true>>,
     DeviceNthelementParams<unsigned long>,
     DeviceNthelementParams<long long>,
     DeviceNthelementParams<float>,
@@ -163,7 +162,7 @@ using RocprimDeviceNthelementTestsParams = ::testing::Types<
     DeviceNthelementParams<rocprim::bfloat16, rocprim::less<rocprim::bfloat16>>,
     DeviceNthelementParams<short>,
     DeviceNthelementParams<double>,
-    DeviceNthelementParams<test_utils::custom_test_type<float>>,
+    DeviceNthelementParams<common::custom_type<float, float, true>>,
     DeviceNthelementParams<test_utils::custom_float_type>,
     DeviceNthelementParams<test_utils::custom_test_array_type<int, 4>>,
     // DeviceNthelementParams<int, rocprim::less<int>, rocprim::default_config, true>, // Graphs currently do not work
@@ -191,13 +190,13 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
     // The size loop alternates between in place and not in place
     bool in_place = false;
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(unsigned int seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
-        for(size_t size : test_utils::get_sizes(seed_value))
+        for(unsigned int size : test_utils::get_sizes(seed_value))
         {
             hipStream_t stream = 0; // default
             if(TestFixture::use_graphs)
@@ -208,56 +207,38 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
 
             SCOPED_TRACE(testing::Message() << "with size = " << size);
 
-            in_place           = !in_place;
-            size_t nth_element = 0;
+            in_place                 = !in_place;
+            unsigned int nth_element = 0;
             if(size > 0)
             {
-                nth_element = test_utils::get_random_value<size_t>(0, size - 1, seed_value);
+                nth_element = test_utils::get_random_value<unsigned int>(0, size - 1, seed_value);
             }
 
             SCOPED_TRACE(testing::Message() << "with nth_element = " << nth_element);
 
             // Generate data
-            std::vector<key_type> input = test_utils::get_random_data<key_type>(
+            std::vector<key_type> input = test_utils::get_random_data_wrapped<key_type>(
                 size,
-                test_utils::generate_limits<key_type>::min(),
-                test_utils::generate_limits<key_type>::max(),
+                common::generate_limits<key_type>::min(),
+                common::generate_limits<key_type>::max(),
                 seed_value);
 
-            std::vector<key_type> output(size);
-
-            key_type* d_input;
-            key_type* d_output;
-            HIP_CHECK(
-                test_common_utils::hipMallocHelper(&d_input, input.size() * sizeof(*d_input)));
-            if(in_place)
-            {
-                d_output = d_input;
-            }
-            else
-            {
-                HIP_CHECK(test_common_utils::hipMallocHelper(&d_output,
-                                                             output.size() * sizeof(*d_output)));
-            }
-
-            HIP_CHECK(hipMemcpy(d_input,
-                                input.data(),
-                                input.size() * sizeof(*d_input),
-                                hipMemcpyHostToDevice));
+            common::device_ptr<key_type> d_input(input);
+            common::device_ptr<key_type> d_output_alloc;
+            d_output_alloc.resize(in_place ? 0 : size);
+            common::device_ptr<key_type>& d_output = in_place ? d_input : d_output_alloc;
 
             const auto input_it
-                = test_utils::wrap_in_indirect_iterator<use_indirect_iterator>(d_input);
+                = test_utils::wrap_in_indirect_iterator<use_indirect_iterator>(d_input.get());
 
             // compare function
             compare_function compare_op;
 
-            // temp storage
-            size_t temp_storage_size_bytes;
-            void*  d_temp_storage = nullptr;
             // Get size of d_temp_storage
+            size_t temp_storage_size_bytes;
             if(in_place)
             {
-                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage,
+                HIP_CHECK(rocprim::nth_element<config>(nullptr,
                                                        temp_storage_size_bytes,
                                                        input_it,
                                                        nth_element,
@@ -268,10 +249,10 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
             }
             else
             {
-                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage,
+                HIP_CHECK(rocprim::nth_element<config>(nullptr,
                                                        temp_storage_size_bytes,
                                                        input_it,
-                                                       d_output,
+                                                       d_output.get(),
                                                        nth_element,
                                                        input.size(),
                                                        compare_op,
@@ -283,9 +264,10 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
             ASSERT_GT(temp_storage_size_bytes, 0);
 
             // allocate temporary storage
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
+            common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
-            test_utils::GraphHelper gHelper;;
+            test_utils::GraphHelper gHelper;
+
             if(TestFixture::use_graphs)
             {
                 gHelper.startStreamCapture(stream);
@@ -294,7 +276,7 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
             if(in_place)
             {
                 // Run
-                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage,
+                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage.get(),
                                                        temp_storage_size_bytes,
                                                        input_it,
                                                        nth_element,
@@ -306,10 +288,10 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
             else
             {
                 // Run
-                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage,
+                HIP_CHECK(rocprim::nth_element<config>(d_temp_storage.get(),
                                                        temp_storage_size_bytes,
                                                        input_it,
-                                                       d_output,
+                                                       d_output.get(),
                                                        nth_element,
                                                        input.size(),
                                                        compare_op,
@@ -326,22 +308,12 @@ TYPED_TEST(RocprimDeviceNthelementTests, NthelementKey)
             HIP_CHECK(hipDeviceSynchronize());
 
             // Copy output to host
-            HIP_CHECK(hipMemcpy(output.data(),
-                                d_output,
-                                output.size() * sizeof(*d_output),
-                                hipMemcpyDeviceToHost));
+            const auto output = d_output.load();
 
             if(size > 0)
             {
                 compare(input, output, nth_element, compare_op);
             }
-
-            HIP_CHECK(hipFree(d_input));
-            if(!in_place)
-            {
-                HIP_CHECK(hipFree(d_output));
-            }
-            HIP_CHECK(hipFree(d_temp_storage));
 
             if(TestFixture::use_graphs)
             {
@@ -365,7 +337,7 @@ TEST(RocprimNthelementKeySameTests, NthelementKeySame)
     const bool debug_synchronous = false;
 
     unsigned int seed_value = rand();
-    for(size_t size : test_utils::get_sizes(seed_value))
+    for(unsigned int size : test_utils::get_sizes(seed_value))
     {
         hipStream_t stream = 0; // default
         SCOPED_TRACE(testing::Message() << "with size = " << size);
@@ -375,27 +347,18 @@ TEST(RocprimNthelementKeySameTests, NthelementKeySame)
 
         // Generate data
         std::vector<key_type> input(size, 8);
-        std::vector<key_type> output(size);
 
-        key_type* d_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_input, input.size() * sizeof(*d_input)));
-
-        HIP_CHECK(hipMemcpy(d_input,
-                            input.data(),
-                            input.size() * sizeof(*d_input),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<key_type> d_input(input);
 
         // compare function
         compare_function compare_op;
 
-        // temp storage
-        size_t temp_storage_size_bytes;
-        void*  d_temp_storage = nullptr;
         // Get size of d_temp_storage
-        HIP_CHECK(rocprim::nth_element(d_temp_storage,
+        size_t temp_storage_size_bytes;
+        HIP_CHECK(rocprim::nth_element(nullptr,
                                        temp_storage_size_bytes,
-                                       d_input,
-                                       d_input,
+                                       d_input.get(),
+                                       d_input.get(),
                                        nth_element,
                                        input.size(),
                                        compare_op,
@@ -406,13 +369,13 @@ TEST(RocprimNthelementKeySameTests, NthelementKeySame)
         ASSERT_GT(temp_storage_size_bytes, 0);
 
         // allocate temporary storage
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_temp_storage, temp_storage_size_bytes));
+        common::device_ptr<void> d_temp_storage(temp_storage_size_bytes);
 
         // Run
-        HIP_CHECK(rocprim::nth_element(d_temp_storage,
+        HIP_CHECK(rocprim::nth_element(d_temp_storage.get(),
                                        temp_storage_size_bytes,
-                                       d_input,
-                                       d_input,
+                                       d_input.get(),
+                                       d_input.get(),
                                        nth_element,
                                        input.size(),
                                        compare_op,
@@ -422,15 +385,9 @@ TEST(RocprimNthelementKeySameTests, NthelementKeySame)
         HIP_CHECK(hipGetLastError());
 
         // Copy output to host
-        HIP_CHECK(hipMemcpy(output.data(),
-                            d_input,
-                            output.size() * sizeof(*d_input),
-                            hipMemcpyDeviceToHost));
+        const auto output = d_input.load();
 
         // Check if the values are the same
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(input, output));
-
-        HIP_CHECK(hipFree(d_input));
-        HIP_CHECK(hipFree(d_temp_storage));
     }
 }

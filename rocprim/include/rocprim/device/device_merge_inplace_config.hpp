@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -18,33 +18,34 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-#ifndef ROCPRIM_DETAIL_MATCH_RESULT_TYPE_HPP_
-#define ROCPRIM_DETAIL_MATCH_RESULT_TYPE_HPP_
+#ifndef ROCPRIM_DEVICE_DEVICE_MERGE_INPLACE_CONFIG_HPP_
+#define ROCPRIM_DEVICE_DEVICE_MERGE_INPLACE_CONFIG_HPP_
 
 #include "../config.hpp"
 
-#include "../type_traits.hpp"
-
-ROCPRIM_PRAGMA_MESSAGE("Internal 'match_result_type.hpp'-header has been depracated. Please "
-                       "include 'rocprim/type_traits.hpp' instead!");
+/// \addtogroup primitivesmodule_deviceconfigs
+/// @{
 
 BEGIN_ROCPRIM_NAMESPACE
-namespace detail
+
+/// \tparam GlobalMergeBlockSize Number of threads per block for global merging.
+/// \tparam BlockMergeBlockSize Number of threads per block for block-level merging.
+/// \tparam BlockMergeItemsPerThread number of items per thread for block-level merging.
+template<unsigned int GlobalMergeBlockSize     = 256,
+         unsigned int BlockMergeBlockSize      = 1024,
+         unsigned int BlockMergeItemsPerThread = 1024>
+struct merge_inplace_config
 {
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+    static constexpr unsigned int global_merge_block_size      = GlobalMergeBlockSize;
+    static constexpr unsigned int block_merge_block_size       = BlockMergeBlockSize;
+    static constexpr unsigned int block_merge_items_per_thread = BlockMergeItemsPerThread;
+#endif
+};
 
-template<class F, class... ArgTypes>
-using invoke_result [[deprecated("Use 'rocprim::invoke_result' instead!")]]
-= rocprim::invoke_result<F, ArgTypes...>;
-
-template<class InputType, class BinaryFunction>
-using match_result [[deprecated("Use 'rocprim::invoke_result_binary_op' instead!")]]
-= rocprim::invoke_result_binary_op<InputType, BinaryFunction>;
-
-template<class InputType, class BinaryFunction>
-using match_result_type [[deprecated("Use 'rocprim::invoke_result_binary_op_t' instead!")]]
-= rocprim::invoke_result_binary_op_t<InputType, BinaryFunction>;
-
-} // end namespace detail
 END_ROCPRIM_NAMESPACE
 
-#endif // ROCPRIM_DETAIL_MATCH_RESULT_TYPE_HPP_
+/// @}
+// end of group primitivesmodule_deviceconfigs
+
+#endif

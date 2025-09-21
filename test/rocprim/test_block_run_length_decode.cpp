@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2023-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,17 +22,30 @@
 
 #include "../common_test_header.hpp"
 
-// required rocprim headers
-#include <gtest/gtest.h>
-#include <rocprim/block/block_run_length_decode.hpp>
-#include <rocprim/config.hpp>
-#include <rocprim/test_utils_data_generation.hpp>
+#include "../../common/utils_data_generation.hpp"
 
 // required test headers
-#include "rocprim/block/block_load_func.hpp"
-#include "rocprim/block/block_store_func.hpp"
-#include "rocprim/functional.hpp"
-#include "test_utils_types.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_data_generation.hpp"
+
+// required common headers
+#include "../../common/utils_device_ptr.hpp"
+
+// required rocprim headers
+#include <rocprim/block/block_load_func.hpp>
+#include <rocprim/block/block_run_length_decode.hpp>
+#include <rocprim/block/block_store_func.hpp>
+#include <rocprim/config.hpp>
+#include <rocprim/functional.hpp>
+#include <rocprim/type_traits.hpp>
+#include <rocprim/types.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <random>
+#include <stdint.h>
+#include <vector>
 
 template<class ItemT,
          class LengthT,
@@ -159,7 +172,7 @@ TYPED_TEST(HipcubBlockRunLengthDecodeTest, TestDecode)
     constexpr unsigned runs_per_thread          = TestFixture::params::runs_per_thread;
     constexpr unsigned decoded_items_per_thread = TestFixture::params::decoded_items_per_thread;
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -167,19 +180,19 @@ TYPED_TEST(HipcubBlockRunLengthDecodeTest, TestDecode)
 
         size_t            num_runs       = runs_per_thread * block_size;
         constexpr LengthT max_run_length = static_cast<LengthT>(
-            std::min(1000ll, static_cast<long long>(test_utils::numeric_limits<LengthT>::max())));
+            std::min(1000ll, static_cast<long long>(rocprim::numeric_limits<LengthT>::max())));
 
         auto run_items = std::vector<ItemT>(num_runs);
-        run_items[0] = test_utils::get_random_value<ItemT>(test_utils::numeric_limits<ItemT>::min(),
-                                                           test_utils::numeric_limits<ItemT>::max(),
+        run_items[0]   = test_utils::get_random_value<ItemT>(rocprim::numeric_limits<ItemT>::min(),
+                                                           rocprim::numeric_limits<ItemT>::max(),
                                                            ++seed_value);
 
         size_t run_item_index = 1;
         while(run_item_index < num_runs)
         {
             run_items[run_item_index]
-                = test_utils::get_random_value<ItemT>(test_utils::numeric_limits<ItemT>::min(),
-                                                      test_utils::numeric_limits<ItemT>::max(),
+                = test_utils::get_random_value<ItemT>(rocprim::numeric_limits<ItemT>::min(),
+                                                      rocprim::numeric_limits<ItemT>::max(),
                                                       ++seed_value);
             if(test_utils::convert_to_native(run_items[run_item_index])
                != test_utils::convert_to_native(run_items[run_item_index - 1]))
@@ -188,21 +201,21 @@ TYPED_TEST(HipcubBlockRunLengthDecodeTest, TestDecode)
             }
         }
 
-        auto run_lengths = test_utils::get_random_data<LengthT>(num_runs,
-                                                                static_cast<LengthT>(1),
-                                                                max_run_length,
-                                                                seed_value);
+        auto run_lengths = test_utils::get_random_data_wrapped<LengthT>(num_runs,
+                                                                        static_cast<LengthT>(1),
+                                                                        max_run_length,
+                                                                        seed_value);
 
-        std::default_random_engine            prng(seed_value);
-        std::uniform_int_distribution<size_t> num_empty_runs_dist(1, 4);
-        const size_t                          num_trailing_empty_runs = num_empty_runs_dist(prng);
+        std::default_random_engine               prng(seed_value);
+        common::uniform_int_distribution<size_t> num_empty_runs_dist(1, 4);
+        const size_t num_trailing_empty_runs = num_empty_runs_dist(prng);
         num_runs += num_trailing_empty_runs;
 
         const auto empty_run_items
-            = test_utils::get_random_data<ItemT>(num_trailing_empty_runs,
-                                                 test_utils::numeric_limits<ItemT>::min(),
-                                                 test_utils::numeric_limits<ItemT>::max(),
-                                                 seed_value);
+            = test_utils::get_random_data_wrapped<ItemT>(num_trailing_empty_runs,
+                                                         rocprim::numeric_limits<ItemT>::min(),
+                                                         rocprim::numeric_limits<ItemT>::max(),
+                                                         seed_value);
         run_items.insert(run_items.end(), empty_run_items.begin(), empty_run_items.end());
         run_lengths.insert(run_lengths.end(), num_trailing_empty_runs, static_cast<LengthT>(0));
 
@@ -215,59 +228,26 @@ TYPED_TEST(HipcubBlockRunLengthDecodeTest, TestDecode)
             }
         }
 
-        ItemT* d_run_items{};
-        HIP_CHECK(
-            test_common_utils::hipMallocHelper(&d_run_items, run_items.size() * sizeof(ItemT)));
-        HIP_CHECK(hipMemcpy(d_run_items,
-                            run_items.data(),
-                            run_items.size() * sizeof(ItemT),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<ItemT>   d_run_items(run_items);
+        common::device_ptr<LengthT> d_run_lengths(run_lengths);
+        common::device_ptr<ItemT>   d_decoded_runs(expected.size());
+        common::device_ptr<LengthT> d_decoded_offsets(expected.size());
 
-        LengthT* d_run_lengths{};
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_run_lengths,
-                                                     run_lengths.size() * sizeof(LengthT)));
-        HIP_CHECK(hipMemcpy(d_run_lengths,
-                            run_lengths.data(),
-                            run_lengths.size() * sizeof(LengthT),
-                            hipMemcpyHostToDevice));
-
-        ItemT* d_decoded_runs{};
-        HIP_CHECK(
-            test_common_utils::hipMallocHelper(&d_decoded_runs, expected.size() * sizeof(ItemT)));
-
-        LengthT* d_decoded_offsets{};
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_decoded_offsets,
-                                                     expected.size() * sizeof(LengthT)));
         block_run_length_decode_kernel<ItemT,
                                        LengthT,
                                        block_size,
                                        runs_per_thread,
                                        decoded_items_per_thread>
-            <<<dim3(1), dim3(block_size), 0, 0>>>(d_run_items,
-                                                  d_run_lengths,
-                                                  d_decoded_runs,
-                                                  d_decoded_offsets);
+            <<<dim3(1), dim3(block_size), 0, 0>>>(d_run_items.get(),
+                                                  d_run_lengths.get(),
+                                                  d_decoded_runs.get(),
+                                                  d_decoded_offsets.get());
 
         HIP_CHECK(hipPeekAtLastError());
         HIP_CHECK(hipDeviceSynchronize());
 
-        std::vector<ItemT> output(expected.size());
-        HIP_CHECK(hipMemcpy(output.data(),
-                            d_decoded_runs,
-                            output.size() * sizeof(ItemT),
-                            hipMemcpyDeviceToHost));
-        HIP_CHECK(hipGetLastError())
-
-        std::vector<LengthT> offsets(expected.size());
-        HIP_CHECK(hipMemcpy(offsets.data(),
-                            d_decoded_offsets,
-                            offsets.size() * sizeof(LengthT),
-                            hipMemcpyDeviceToHost));
-
-        HIP_CHECK(hipFree(d_run_items));
-        HIP_CHECK(hipFree(d_run_lengths));
-        HIP_CHECK(hipFree(d_decoded_runs));
-        HIP_CHECK(hipFree(d_decoded_offsets));
+        std::vector<ItemT>   output  = d_decoded_runs.load();
+        std::vector<LengthT> offsets = d_decoded_offsets.load();
 
         unsigned int expected_offset = -1;
         ItemT        previous_value  = ItemT{};

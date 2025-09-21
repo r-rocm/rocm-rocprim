@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -42,8 +42,8 @@ BEGIN_ROCPRIM_NAMESPACE
 /// * Using it for simulating a range filled with a sequence of same values saves
 /// memory capacity and bandwidth.
 ///
-/// \tparam ValueType - type of value that can be obtained by dereferencing the iterator.
-/// \tparam Difference - a type used for identify distance between iterators
+/// \tparam ValueType type of value that can be obtained by dereferencing the iterator.
+/// \tparam Difference a type used for identify distance between iterators
 template<
     class ValueType,
     class Difference = std::ptrdiff_t
@@ -203,12 +203,6 @@ public:
     {
         return distance_to(other) <= 0;
     }
-
-    [[deprecated]] friend std::ostream& operator<<(std::ostream& os, const constant_iterator& iter)
-    {
-        os << "[" << iter.value_ << "]";
-        return os;
-    }
     #endif // DOXYGEN_SHOULD_SKIP_THIS
 
 private:
@@ -239,11 +233,11 @@ operator+(typename constant_iterator<ValueType, Difference>::difference_type dis
 /// make_constant_iterator creates a constant_iterator with its initial value
 /// set to \p value.
 ///
-/// \tparam ValueType - type of value that can be obtained by dereferencing created iterator.
-/// \tparam Difference - a type used for identify distance between constant_iterator iterators.
+/// \tparam ValueType type of value that can be obtained by dereferencing created iterator.
+/// \tparam Difference a type used for identify distance between constant_iterator iterators.
 ///
-/// \param value - initial value for constant_iterator.
-/// \param index - optional index for constant_iterator.
+/// \param value initial value for constant_iterator.
+/// \param index optional index for constant_iterator.
 template<
     class ValueType,
     class Difference = std::ptrdiff_t

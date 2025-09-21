@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,29 @@
 
 #ifndef TEST_BLOCK_RADIX_RANK_HPP_
 #define TEST_BLOCK_RADIX_RANK_HPP_
+
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_data_generation.hpp"
+
+#include "../../common/utils_device_ptr.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+#include "test_utils_sort_comparator.hpp"
+
+#include <rocprim/block/block_exchange.hpp>
+#include <rocprim/block/block_load_func.hpp>
+#include <rocprim/block/block_radix_rank.hpp>
+#include <rocprim/block/block_store_func.hpp>
+#include <rocprim/config.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <numeric>
+#include <vector>
 
 template<class Params>
 class RocprimBlockRadixRank : public ::testing::Test
@@ -45,11 +68,12 @@ template<typename T,
          unsigned int                        ItemsPerThread,
          unsigned int                        MaxRadixBits,
          rocprim::block_radix_rank_algorithm Algorithm>
-__global__ __launch_bounds__(BlockSize) void rank_kernel(const T* const      items_input,
-                                                         unsigned int* const ranks_output,
-                                                         const bool          descending,
-                                                         const unsigned int  start_bit,
-                                                         const unsigned int  radix_bits)
+__global__ __launch_bounds__(BlockSize)
+void rank_kernel(const T* const      items_input,
+                 unsigned int* const ranks_output,
+                 const bool          descending,
+                 const unsigned int  start_bit,
+                 const unsigned int  radix_bits)
 {
     using block_rank_type     = rocprim::block_radix_rank<BlockSize, MaxRadixBits, Algorithm>;
     using keys_exchange_type  = rocprim::block_exchange<T, BlockSize, ItemsPerThread>;
@@ -72,7 +96,7 @@ __global__ __launch_bounds__(BlockSize) void rank_kernel(const T* const      ite
     unsigned int ranks[ItemsPerThread];
 
     rocprim::block_load_direct_blocked(lid, items_input + block_offset, keys);
-    if ROCPRIM_IF_CONSTEXPR(warp_striped)
+    if constexpr(warp_striped)
     {
         // block_radix_rank_match requires warp striped input and output. Instead of using
         // rocprim::block_load_direct_warp_striped though, we load directly and exchange the
@@ -91,7 +115,7 @@ __global__ __launch_bounds__(BlockSize) void rank_kernel(const T* const      ite
         block_rank_type().rank_keys(keys, ranks, storage.rank, start_bit, radix_bits);
     }
 
-    if ROCPRIM_IF_CONSTEXPR(warp_striped)
+    if constexpr(warp_striped)
     {
         // See the comment above.
         rocprim::syncthreads();
@@ -132,7 +156,7 @@ void test_block_radix_rank()
     SCOPED_TRACE(testing::Message() << "with grid_size = " << size);
     SCOPED_TRACE(testing::Message() << "with size = " << size);
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; ++seed_index)
+    for(size_t seed_index = 0; seed_index < number_of_runs; ++seed_index)
     {
         seed_type seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -140,10 +164,10 @@ void test_block_radix_rank()
 
         // Generate data
         std::vector<T> keys_input
-            = test_utils::get_random_data<T>(size,
-                                             test_utils::generate_limits<T>::min(),
-                                             test_utils::generate_limits<T>::max(),
-                                             seed_value);
+            = test_utils::get_random_data_wrapped<T>(size,
+                                                     common::generate_limits<T>::min(),
+                                                     common::generate_limits<T>::max(),
+                                                     seed_value);
 
         // Calculated expected results on host
         std::vector<unsigned int> expected(size);
@@ -168,13 +192,8 @@ void test_block_radix_rank()
             }
         }
 
-        T* d_keys_input;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_keys_input, size * sizeof(T)));
-        unsigned int* d_ranks_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_ranks_output, size * sizeof(unsigned int)));
-
-        HIP_CHECK(
-            hipMemcpy(d_keys_input, keys_input.data(), size * sizeof(T), hipMemcpyHostToDevice));
+        common::device_ptr<T>            d_keys_input(keys_input);
+        common::device_ptr<unsigned int> d_ranks_output(size);
 
         // Running kernel
         hipLaunchKernelGGL(
@@ -184,25 +203,17 @@ void test_block_radix_rank()
             dim3(block_size),
             0,
             0,
-            d_keys_input,
-            d_ranks_output,
+            d_keys_input.get(),
+            d_ranks_output.get(),
             descending,
             start_bit,
             radix_bits);
         HIP_CHECK(hipGetLastError());
 
         // Getting results to host
-        std::vector<unsigned int> ranks_output(size);
-        HIP_CHECK(hipMemcpy(ranks_output.data(),
-                            d_ranks_output,
-                            size * sizeof(unsigned int),
-                            hipMemcpyDeviceToHost));
-        HIP_CHECK(hipDeviceSynchronize());
+        auto ranks_output = d_ranks_output.load();
 
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(ranks_output, expected));
-
-        HIP_CHECK(hipFree(d_keys_input));
-        HIP_CHECK(hipFree(d_ranks_output));
     }
 }
 

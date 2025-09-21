@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -62,22 +62,35 @@ struct select_block_reduce_impl;
 template<>
 struct select_block_reduce_impl<block_reduce_algorithm::using_warp_reduce>
 {
-    template<class T, unsigned int BlockSizeX, unsigned int BlockSizeY, unsigned int BlockSizeZ>
-    using type = block_reduce_warp_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ>;
+    template<class T,
+             unsigned int            BlockSizeX,
+             unsigned int            BlockSizeY,
+             unsigned int            BlockSizeZ,
+             arch::wavefront::target TargetWaveSize>
+    using type = block_reduce_warp_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ, TargetWaveSize>;
 };
 
 template<>
 struct select_block_reduce_impl<block_reduce_algorithm::raking_reduce>
 {
-    template<class T, unsigned int BlockSizeX, unsigned int BlockSizeY, unsigned int BlockSizeZ>
-    using type = block_reduce_raking_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ>;
+    template<class T,
+             unsigned int            BlockSizeX,
+             unsigned int            BlockSizeY,
+             unsigned int            BlockSizeZ,
+             arch::wavefront::target TargetWaveSize>
+    using type = block_reduce_raking_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ, TargetWaveSize>;
 };
 
 template<>
 struct select_block_reduce_impl<block_reduce_algorithm::raking_reduce_commutative_only>
 {
-    template<class T, unsigned int BlockSizeX, unsigned int BlockSizeY, unsigned int BlockSizeZ>
-    using type = block_reduce_raking_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ, true>;
+    template<class T,
+             unsigned int            BlockSizeX,
+             unsigned int            BlockSizeY,
+             unsigned int            BlockSizeZ,
+             arch::wavefront::target TargetWaveSize>
+    using type
+        = block_reduce_raking_reduce<T, BlockSizeX, BlockSizeY, BlockSizeZ, TargetWaveSize, true>;
 };
 
 
@@ -86,9 +99,9 @@ struct select_block_reduce_impl<block_reduce_algorithm::raking_reduce_commutativ
 /// \brief The block_reduce class is a block level parallel primitive which provides methods
 /// for performing reductions operations on items partitioned across threads in a block.
 ///
-/// \tparam T - the input/output type.
-/// \tparam BlockSize - the number of threads in a block.
-/// \tparam Algorithm - selected reduce algorithm, block_reduce_algorithm::default_algorithm by default.
+/// \tparam T the input/output type.
+/// \tparam BlockSize the number of threads in a block.
+/// \tparam Algorithm selected reduce algorithm, block_reduce_algorithm::default_algorithm by default.
 ///
 /// \par Overview
 /// * Supports non-commutative reduce operators. However, a reduce operator should be
@@ -98,7 +111,7 @@ struct select_block_reduce_impl<block_reduce_algorithm::raking_reduce_commutativ
 ///   * \p ItemsPerThread is greater than one,
 ///   * \p T is an arithmetic type,
 ///   * reduce operation is simple addition operator, and
-///   * the number of threads in the block is a multiple of the hardware warp size (see rocprim::arch::wavefront::min_size()).
+///   * the number of threads in the block is a multiple of the hardware warp size (see \p rocprim::arch::wavefront::min_size() ).
 /// * block_reduce has three alternative implementations: \p block_reduce_algorithm::using_warp_reduce,
 ///   \p block_reduce_algorithm::raking_reduce and \p block_reduce_algorithm::raking_reduce_commutative_only.
 /// * If the block sizes less than 64 only one warp reduction is used. The block reduction algorithm
@@ -129,19 +142,21 @@ struct select_block_reduce_impl<block_reduce_algorithm::raking_reduce_commutativ
 /// }
 /// \endcode
 /// \endparblock
-template<
-    class T,
-    unsigned int BlockSizeX,
-    block_reduce_algorithm Algorithm = block_reduce_algorithm::default_algorithm,
-    unsigned int BlockSizeY = 1,
-    unsigned int BlockSizeZ = 1
->
+template<class T,
+         unsigned int            BlockSizeX,
+         block_reduce_algorithm  Algorithm      = block_reduce_algorithm::default_algorithm,
+         unsigned int            BlockSizeY     = 1,
+         unsigned int            BlockSizeZ     = 1,
+         arch::wavefront::target TargetWaveSize = arch::wavefront::get_target()>
 class block_reduce
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
-    : private detail::select_block_reduce_impl<Algorithm>::template type<T, BlockSizeX, BlockSizeY, BlockSizeZ>
+    : private detail::select_block_reduce_impl<
+          Algorithm>::template type<T, BlockSizeX, BlockSizeY, BlockSizeZ, TargetWaveSize>
 #endif
 {
-    using base_type = typename detail::select_block_reduce_impl<Algorithm>::template type<T, BlockSizeX, BlockSizeY, BlockSizeZ>;
+    using base_type = typename detail::select_block_reduce_impl<
+        Algorithm>::template type<T, BlockSizeX, BlockSizeY, BlockSizeZ, TargetWaveSize>;
+
 public:
     /// \brief Struct used to allocate a temporary memory that is required for thread
     /// communication during operations provided by related parallel primitive.
@@ -155,13 +170,13 @@ public:
 
     /// \brief Performs reduction across threads in a block.
     ///
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - thread input value.
-    /// \param [out] output - reference to a thread output value. May be aliased with \p input.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input thread input value.
+    /// \param [out] output reference to a thread output value. May be aliased with \p input.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -215,12 +230,12 @@ public:
     /// * This overload does not accept storage argument. Required shared memory is
     /// allocated by the method itself.
     ///
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - thread input value.
-    /// \param [out] output - reference to a thread output value. May be aliased with \p input.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input thread input value.
+    /// \param [out] output reference to a thread output value. May be aliased with \p input.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -235,14 +250,14 @@ public:
 
     /// \brief Performs reduction across threads in a block.
     ///
-    /// \tparam ItemsPerThread - number of items in the \p input array.
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam ItemsPerThread number of items in the \p input array.
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - reference to an array containing thread input values.
-    /// \param [out] output - reference to a thread output array. May be aliased with \p input.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input reference to an array containing thread input values.
+    /// \param [out] output reference to a thread output array. May be aliased with \p input.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -299,13 +314,13 @@ public:
     /// * This overload does not accept storage argument. Required shared memory is
     /// allocated by the method itself.
     ///
-    /// \tparam ItemsPerThread - number of items in the \p input array.
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam ItemsPerThread number of items in the \p input array.
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - reference to an array containing thread input values.
-    /// \param [out] output - reference to a thread output array. May be aliased with \p input.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input reference to an array containing thread input values.
+    /// \param [out] output reference to a thread output array. May be aliased with \p input.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -323,14 +338,14 @@ public:
 
     /// \brief Performs reduction across threads in a block.
     ///
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - thread input value.
-    /// \param [out] output - reference to a thread output value. May be aliased with \p input.
-    /// \param [in] valid_items - number of items that will be reduced in the block.
-    /// \param [in] storage - reference to a temporary storage object of type storage_type.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input thread input value.
+    /// \param [out] output reference to a thread output value. May be aliased with \p input.
+    /// \param [in] valid_items number of items that will be reduced in the block.
+    /// \param [in] storage reference to a temporary storage object of type storage_type.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -384,14 +399,14 @@ public:
     /// * This overload does not accept storage argument. Required shared memory is
     /// allocated by the method itself.
     ///
-    /// \tparam ItemsPerThread - number of items in the \p input array.
-    /// \tparam BinaryFunction - type of binary function used for reduce. Default type
+    /// \tparam ItemsPerThread number of items in the \p input array.
+    /// \tparam BinaryFunction type of binary function used for reduce. Default type
     /// is rocprim::plus<T>.
     ///
-    /// \param [in] input - reference to an array containing thread input values.
-    /// \param [out] output - reference to a thread output array. May be aliased with \p input.
-    /// \param [in] valid_items - number of items that will be reduced in the block.
-    /// \param [in] reduce_op - binary operation function object that will be used for reduce.
+    /// \param [in] input reference to an array containing thread input values.
+    /// \param [out] output reference to a thread output array. May be aliased with \p input.
+    /// \param [in] valid_items number of items that will be reduced in the block.
+    /// \param [in] reduce_op binary operation function object that will be used for reduce.
     /// The signature of the function should be equivalent to the following:
     /// <tt>T f(const T &a, const T &b);</tt>. The signature does not need to have
     /// <tt>const &</tt>, but function object must not modify the objects passed to it.
@@ -405,6 +420,46 @@ public:
         base_type::reduce(input, output, valid_items, reduce_op);
     }
 };
+
+#ifndef DOXYGEN_SHOULD_SKIP_THIS
+template<class T,
+         unsigned int           BlockSizeX,
+         block_reduce_algorithm Algorithm,
+         unsigned int           BlockSizeY,
+         unsigned int           BlockSizeZ>
+class block_reduce<T,
+                   BlockSizeX,
+                   Algorithm,
+                   BlockSizeY,
+                   BlockSizeZ,
+                   arch::wavefront::target::dynamic>
+{
+private:
+    using block_reduce_wave32 = block_reduce<T,
+                                             BlockSizeX,
+                                             Algorithm,
+                                             BlockSizeY,
+                                             BlockSizeZ,
+                                             arch::wavefront::target::size32>;
+    using block_reduce_wave64 = block_reduce<T,
+                                             BlockSizeX,
+                                             Algorithm,
+                                             BlockSizeY,
+                                             BlockSizeZ,
+                                             arch::wavefront::target::size64>;
+    using dispatch = detail::dispatch_wave_size<block_reduce_wave32, block_reduce_wave64>;
+
+public:
+    using storage_type = typename dispatch::storage_type;
+
+    template<typename... Args>
+    ROCPRIM_DEVICE ROCPRIM_INLINE
+    auto reduce(Args&&... args)
+    {
+        dispatch{}([](auto impl, auto&&... args) { impl.reduce(args...); }, args...);
+    }
+};
+#endif // DOXYGEN_SHOULD_SKIP_THIS
 
 END_ROCPRIM_NAMESPACE
 

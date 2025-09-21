@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -226,7 +226,7 @@ struct is_sample_vectorizable
 
 template<unsigned int BlockSize, unsigned int ItemsPerThread, unsigned int Channels, class Sample>
 ROCPRIM_DEVICE ROCPRIM_INLINE
-    typename std::enable_if<is_sample_vectorizable<ItemsPerThread, Channels, Sample>::value>::type
+typename std::enable_if<is_sample_vectorizable<ItemsPerThread, Channels, Sample>::value>::type
     load_samples(unsigned int flat_id,
                  Sample*      samples,
                  sample_vector<Sample, Channels> (&values)[ItemsPerThread])
@@ -306,8 +306,9 @@ ROCPRIM_DEVICE ROCPRIM_INLINE void
 }
 
 template<unsigned int BlockSize, unsigned int ActiveChannels, class Counter>
-ROCPRIM_DEVICE ROCPRIM_INLINE void init_histogram(fixed_array<Counter*, ActiveChannels> histogram,
-                                                  fixed_array<unsigned int, ActiveChannels> bins)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+void init_histogram(fixed_array<Counter*, ActiveChannels>           histogram,
+                    const fixed_array<unsigned int, ActiveChannels> bins)
 {
     const unsigned int flat_id  = ::rocprim::detail::block_thread_id<0>();
     const unsigned int block_id = ::rocprim::detail::block_id<0>();
@@ -329,17 +330,17 @@ template<unsigned int BlockSize,
          class SampleIterator,
          class Counter,
          class SampleToBinOp>
-ROCPRIM_DEVICE ROCPRIM_INLINE void
-    histogram_shared(SampleIterator                             samples,
-                     unsigned int                               columns,
-                     unsigned int                               rows,
-                     unsigned int                               row_stride,
-                     unsigned int                               rows_per_block,
-                     unsigned int                               shared_histograms,
-                     fixed_array<Counter*, ActiveChannels>      histogram,
-                     fixed_array<SampleToBinOp, ActiveChannels> sample_to_bin_op,
-                     fixed_array<unsigned int, ActiveChannels>  bins,
-                     unsigned int*                              block_histogram_start)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+void histogram_shared(SampleIterator                                   samples,
+                      unsigned int                                     columns,
+                      unsigned int                                     rows,
+                      unsigned int                                     row_stride,
+                      unsigned int                                     rows_per_block,
+                      unsigned int                                     shared_histograms,
+                      fixed_array<Counter*, ActiveChannels>            histogram,
+                      const fixed_array<SampleToBinOp, ActiveChannels> sample_to_bin_op,
+                      const fixed_array<unsigned int, ActiveChannels>  bins,
+                      unsigned int*                                    block_histogram_start)
 {
     using sample_type        = typename std::iterator_traits<SampleIterator>::value_type;
     using sample_vector_type = sample_vector<sample_type, Channels>;
@@ -357,7 +358,9 @@ ROCPRIM_DEVICE ROCPRIM_INLINE void
     for(unsigned int channel = 0; channel < ActiveChannels; channel++)
     {
         block_histogram[channel] = block_histogram_start + total_bins;
-        total_bins += bins[channel];
+        const unsigned int size  = bins[channel];
+        // Prevent LDS bank conflicts
+        total_bins += rocprim::detail::is_power_of_two(size) ? size + 1 : size;
     }
 
     // partial histogram to work with
@@ -454,13 +457,13 @@ template<unsigned int BlockSize,
          class SampleIterator,
          class Counter,
          class SampleToBinOp>
-ROCPRIM_DEVICE ROCPRIM_INLINE void
-    histogram_global(SampleIterator                             samples,
-                     unsigned int                               columns,
-                     unsigned int                               row_stride,
-                     fixed_array<Counter*, ActiveChannels>      histogram,
-                     fixed_array<SampleToBinOp, ActiveChannels> sample_to_bin_op,
-                     fixed_array<unsigned int, ActiveChannels>  bins_bits)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+void histogram_global(SampleIterator                                   samples,
+                      unsigned int                                     columns,
+                      unsigned int                                     row_stride,
+                      fixed_array<Counter*, ActiveChannels>            histogram,
+                      const fixed_array<SampleToBinOp, ActiveChannels> sample_to_bin_op,
+                      const fixed_array<unsigned int, ActiveChannels>  bins_bits)
 {
     using sample_type        = typename std::iterator_traits<SampleIterator>::value_type;
     using sample_vector_type = sample_vector<sample_type, Channels>;
@@ -487,6 +490,7 @@ ROCPRIM_DEVICE ROCPRIM_INLINE void
         load_samples<BlockSize>(flat_id, samples, values, valid_count);
     }
 
+    ROCPRIM_UNROLL
     for(unsigned int i = 0; i < ItemsPerThread; i++)
     {
         for(unsigned int channel = 0; channel < ActiveChannels; channel++)

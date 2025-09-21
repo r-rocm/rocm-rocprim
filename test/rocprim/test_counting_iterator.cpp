@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,12 +22,21 @@
 
 #include "../common_test_header.hpp"
 
-// required rocprim headers
-#include <rocprim/iterator/counting_iterator.hpp>
-#include <rocprim/device/device_transform.hpp>
-
 // required test headers
-#include "test_utils_types.hpp"
+#include "test_seed.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+
+// required common headers
+#include "../../common/utils_device_ptr.hpp"
+
+// required rocprim headers
+#include <rocprim/device/device_transform.hpp>
+#include <rocprim/iterator/counting_iterator.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <vector>
 
 // Params for tests
 template<class InputType>
@@ -44,14 +53,99 @@ public:
     const bool debug_synchronous = false;
 };
 
-typedef ::testing::Types<
-    RocprimCountingIteratorParams<int>,
-    RocprimCountingIteratorParams<unsigned int>,
-    RocprimCountingIteratorParams<unsigned long>,
-    RocprimCountingIteratorParams<size_t>
-> RocprimCountingIteratorTestsParams;
+using RocprimCountingIteratorTestsParams
+    = ::testing::Types<RocprimCountingIteratorParams<int>,
+                       RocprimCountingIteratorParams<unsigned int>,
+                       RocprimCountingIteratorParams<unsigned long>,
+                       RocprimCountingIteratorParams<size_t>>;
 
 TYPED_TEST_SUITE(RocprimCountingIteratorTests, RocprimCountingIteratorTestsParams);
+
+TYPED_TEST(RocprimCountingIteratorTests, Basic)
+{
+    int device_id = test_common_utils::obtain_device_from_ctest();
+    SCOPED_TRACE(testing::Message() << "with device_id = " << device_id);
+    HIP_CHECK(hipSetDevice(device_id));
+
+    using T          = typename TestFixture::input_type;
+    using Iterator   = rocprim::counting_iterator<T>;
+    using value_type = typename Iterator::value_type;
+
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
+    {
+        unsigned int seed_value
+            = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
+        SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
+
+        T        start_value = test_utils::get_random_value<T>(1, 100, seed_value);
+        Iterator begin       = rocprim::make_counting_iterator<T>(start_value);
+        Iterator mid         = begin + 5;
+        Iterator end         = begin + 10;
+
+        // Pre-increment
+        Iterator it = begin;
+        ++it;
+        ASSERT_EQ(*it, start_value + 1);
+
+        // Post-increment
+        Iterator post = it++;
+        ASSERT_EQ(*post, start_value + 1);
+        ASSERT_EQ(*it, start_value + 2);
+
+        // Pre-decrement
+        --it;
+        ASSERT_EQ(*it, start_value + 1);
+
+        // Post-decrement
+        post = it--;
+        ASSERT_EQ(*post, start_value + 1);
+        ASSERT_EQ(*it, start_value + 0);
+
+        // operator+
+        Iterator plus_it = begin + 3;
+        ASSERT_EQ(*plus_it, start_value + 3);
+        Iterator plus_it_rev = 3 + begin;
+        ASSERT_EQ(*plus_it_rev, start_value + 3);
+
+        // operator-
+        Iterator minus_it = end - 3;
+        ASSERT_EQ(*minus_it, start_value + 7);
+
+        // compound assignment +=
+        Iterator a = begin;
+        a += 4;
+        ASSERT_EQ(*a, start_value + 4);
+
+        // compound assignment -=
+        a -= 2;
+        ASSERT_EQ(*a, start_value + 2);
+
+        // Subtraction of iterators (distance)
+        ASSERT_EQ(end - begin, T(10));
+        ASSERT_EQ(mid - begin, T(5));
+        ASSERT_EQ(begin - mid, T(-5));
+
+        // Indexing operator[]
+        for(int i = 0; i < 10; i++)
+        {
+            ASSERT_EQ(begin[i], start_value + i);
+        }
+
+        // Comparisons
+        ASSERT_TRUE(begin == begin);
+        ASSERT_TRUE(begin != end);
+        ASSERT_TRUE(begin < end);
+        ASSERT_TRUE(end > begin);
+        ASSERT_TRUE(begin <= begin);
+        ASSERT_TRUE(begin <= end);
+        ASSERT_TRUE(end >= begin);
+        ASSERT_TRUE(end >= end);
+
+        // Arrow operator
+        const value_type* ptr = begin.operator->();
+        ASSERT_EQ(*ptr, start_value);
+    }
+}
 
 template<class T>
 struct transform
@@ -77,7 +171,7 @@ TYPED_TEST(RocprimCountingIteratorTests, Transform)
 
     hipStream_t stream = 0; // default
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
@@ -87,9 +181,7 @@ TYPED_TEST(RocprimCountingIteratorTests, Transform)
         Iterator input_begin(test_utils::get_random_value<T>(0, 200, seed_value));
 
         std::vector<T> output(size);
-        T * d_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, output.size() * sizeof(T)));
-        HIP_CHECK(hipDeviceSynchronize());
+        common::device_ptr<T> d_output(output.size());
 
         // Calculate expected results on host
         std::vector<T> expected(size);
@@ -101,32 +193,19 @@ TYPED_TEST(RocprimCountingIteratorTests, Transform)
         );
 
         // Run
-        HIP_CHECK(
-            rocprim::transform(
-                input_begin, d_output, size,
-                transform<T>(), stream, debug_synchronous
-            )
-        );
+        HIP_CHECK(rocprim::transform(input_begin,
+                                     d_output.get(),
+                                     size,
+                                     transform<T>(),
+                                     stream,
+                                     debug_synchronous));
         HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipDeviceSynchronize());
 
         // Copy output to host
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), d_output,
-                output.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
-        HIP_CHECK(hipDeviceSynchronize());
+        output = d_output.load();
 
         // Validating results
-        for(size_t i = 0; i < output.size(); i++)
-        {
-            ASSERT_EQ(output[i], expected[i]) << "where index = " << i;
-        }
-
-        HIP_CHECK(hipFree(d_output));
+        ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(output, expected));
     }
-
 }

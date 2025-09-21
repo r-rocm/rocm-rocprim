@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,23 +22,27 @@
 
 #include "../common_test_header.hpp"
 
-#include <rocprim/detail/various.hpp>
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_data_generation.hpp"
+
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_custom_test_types.hpp"
+#include "test_utils_data_generation.hpp"
+#include "test_utils_sort_comparator.hpp"
+
 #include <rocprim/device/detail/device_radix_sort.hpp>
-#include <rocprim/test_utils.hpp>
-#include <rocprim/test_utils_assertions.hpp>
-#include <rocprim/test_utils_custom_test_types.hpp>
-#include <rocprim/test_utils_data_generation.hpp>
-#include <rocprim/test_utils_sort_comparator.hpp>
-#include <rocprim/thread/radix_key_codec.hpp>
+#include <rocprim/type_traits.hpp>
+#include <rocprim/types.hpp>
 #include <rocprim/types/tuple.hpp>
 
-#include <gtest/gtest-typed-test.h>
-#include <gtest/internal/gtest-type-util.h>
-
-#include <algorithm>
+#include <cstddef>
 #include <ios>
 #include <ostream>
 #include <sstream>
+#include <stdint.h>
+#include <vector>
 
 struct extract_digit_params
 {
@@ -90,7 +94,7 @@ struct custom_key_decomposer
 
 TEST_P(RadixKeyCodecTest, ExtractDigit)
 {
-    using codec = rocprim::detail::radix_key_codec<custom_key>;
+    using codec = decltype(rocprim::traits::get<custom_key>().radix_key_codec());
 
     const custom_key key{0xab, 0xcdef, 0x01};
     const auto       digit = codec::extract_digit(key,
@@ -122,7 +126,7 @@ struct custom_key_decomposer_with_unused
 
 TEST_P(RadixKeyCodecUnusedTest, ExtractDigitUnused)
 {
-    using codec = rocprim::detail::radix_key_codec<custom_key>;
+    using codec = decltype(rocprim::traits::get<custom_key>().radix_key_codec());
 
     const custom_key key{0xab, 0xcdef, 0x01};
     const auto       digit = codec::extract_digit(key,
@@ -135,8 +139,8 @@ TEST_P(RadixKeyCodecUnusedTest, ExtractDigitUnused)
 
 TEST(RadixKeyCodecTest, ExtractCustomTestType)
 {
-    using T       = test_utils::custom_test_type<int>;
-    using codec_t = rocprim::detail::radix_key_codec<T, true>;
+    using T       = common::custom_type<int, int, true>;
+    using codec_t = decltype(rocprim::traits::get<T>().radix_key_codec<true>());
 
     T value{12, 34};
 
@@ -296,7 +300,7 @@ struct TypedRadixKeyCodecTestParams
 template<class T>
 struct custom_test_type_decomposer
 {
-    auto operator()(test_utils::custom_test_type<T>& value) const
+    auto operator()(common::custom_type<T, T, true>& value) const
     {
         return ::rocprim::tuple<T&, T&>{value.x, value.y};
     }
@@ -324,7 +328,9 @@ TYPED_TEST_SUITE(TypedRadixKeyCodecTest, TypedRadixKeyCodecTestTypes);
 template<bool Descending, class Key, class Decomposer>
 void encode_then_decode_test(Key key, Decomposer decomposer)
 {
-    using codec_t = ::rocprim::radix_key_codec<Key, Descending>;
+    constexpr auto input_traits = ::rocprim::traits::get<Key>();
+    constexpr auto codec        = input_traits.template radix_key_codec<Descending>();
+    using codec_t               = decltype(codec);
     using BitKey  = typename codec_t::bit_key_type;
 
     BitKey bit_key = codec_t::encode(key, decomposer);
@@ -349,7 +355,9 @@ void encode_then_extract_test(Key                key,
                               const unsigned int radix_bits,
                               Decomposer         decomposer)
 {
-    using codec_t = ::rocprim::radix_key_codec<Key, Descending>;
+    constexpr auto input_traits = ::rocprim::traits::get<Key>();
+    constexpr auto codec        = input_traits.template radix_key_codec<Descending>();
+    using codec_t               = decltype(codec);
     using BitKey  = typename codec_t::bit_key_type;
 
     BitKey bit_key = codec_t::encode(key, decomposer);
@@ -378,7 +386,9 @@ void encode_then_extract_test_custom(Key                key,
                                      const unsigned int radix_bits,
                                      Decomposer         decomposer)
 {
-    using codec_t = ::rocprim::radix_key_codec<Key, Descending>;
+    constexpr auto input_traits = ::rocprim::traits::get<Key>();
+    constexpr auto codec        = input_traits.template radix_key_codec<Descending>();
+    using codec_t               = decltype(codec);
     using BitKey  = typename codec_t::bit_key_type;
 
     BitKey bit_key = codec_t::encode(key, decomposer);
@@ -411,14 +421,14 @@ TYPED_TEST(TypedRadixKeyCodecTest, EncodeDecodeExtract)
 {
     using params                      = typename TestFixture::params;
     using Key                         = typename params::Key;
-    using CustomKey                   = typename test_utils::custom_test_type<Key>;
+    using CustomKey                   = typename common::custom_type<Key, Key, true>;
     using CustomDecomposer            = custom_test_type_decomposer<Key>;
     constexpr unsigned int start_bit  = params::start_bit;
     constexpr unsigned int radix_bits = params::radix_bits;
 
     CustomDecomposer custom_decomposer{};
 
-    for(size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -426,10 +436,10 @@ TYPED_TEST(TypedRadixKeyCodecTest, EncodeDecodeExtract)
 
         const size_t     size = (1 << 20) + 123;
         std::vector<Key> input_keys
-            = test_utils::get_random_data<Key>(size,
-                                               test_utils::generate_limits<Key>::min(),
-                                               test_utils::generate_limits<Key>::max(),
-                                               seed_value);
+            = test_utils::get_random_data_wrapped<Key>(size,
+                                                       common::generate_limits<Key>::min(),
+                                                       common::generate_limits<Key>::max(),
+                                                       seed_value);
 
         for(size_t i = 0; i < size; ++i)
         {
