@@ -10,6 +10,7 @@ subtrees:
       - file: concepts/glossary.rst
       - file: concepts/tuning.rst
       - file: concepts/developer.rst
+      - file: concepts/spirv.rst
   - file: reference/reference.rst
     title: API Reference
     subtrees:
@@ -53,6 +54,7 @@ subtrees:
               - file: block_ops/ops_classes/discontinuity.rst
               - file: block_ops/ops_classes/scan.rst
               - file: block_ops/ops_classes/reduce.rst
+              - file: block_ops/ops_classes/run_length_decode.rst
               - file: block_ops/ops_classes/shuffle.rst
               - file: block_ops/ops_classes/exchange.rst
               - file: block_ops/ops_classes/sort.rst

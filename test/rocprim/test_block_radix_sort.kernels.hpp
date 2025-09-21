@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,31 @@
 
 #ifndef TEST_BLOCK_RADIX_SORT_KERNELS_HPP_
 #define TEST_BLOCK_RADIX_SORT_KERNELS_HPP_
+
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_data_generation.hpp"
+
+#include "../../common/utils_device_ptr.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+#include "test_utils_sort_comparator.hpp"
+
+#include <rocprim/block/block_load_func.hpp>
+#include <rocprim/block/block_radix_sort.hpp>
+#include <rocprim/block/block_store_func.hpp>
+#include <rocprim/type_traits.hpp>
+#include <rocprim/types.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <numeric>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 static constexpr size_t n_sizes = 12;
 static constexpr unsigned int items_radix[n_sizes] = {
@@ -59,26 +84,30 @@ __global__ __launch_bounds__(BlockSize) void sort_key_kernel(key_type*    device
     key_type keys[ItemsPerThread];
     rocprim::block_load_direct_blocked(lid, device_keys_output + block_offset, keys);
 
-    rocprim::block_radix_sort<key_type,
-                              BlockSize,
-                              ItemsPerThread,
-                              rocprim::empty_type,
-                              1,
-                              1,
-                              RadixBitsPerPass>
-        bsort;
-
+    using block_radix_sort = rocprim::block_radix_sort<key_type,
+                                                       BlockSize,
+                                                       ItemsPerThread,
+                                                       rocprim::empty_type,
+                                                       1,
+                                                       1,
+                                                       RadixBitsPerPass>;
+    block_radix_sort                          bsort;
     test_utils::select_decomposer_t<key_type> decomposer{};
 
+    // Share LDS storage between all different sort invocations explicitely.
+    // This resolves local memory allocation exceeding limits when targeting SPIR-V.
+    __shared__ typename block_radix_sort::storage_type storage;
+
+    // Sort differently depending on passed flags.
     if(to_striped)
     {
         if(descending)
         {
-            bsort.sort_desc_to_striped(keys, start_bit, end_bit, decomposer);
+            bsort.sort_desc_to_striped(keys, storage, start_bit, end_bit, decomposer);
         }
         else
         {
-            bsort.sort_to_striped(keys, start_bit, end_bit, decomposer);
+            bsort.sort_to_striped(keys, storage, start_bit, end_bit, decomposer);
         }
 
         rocprim::block_store_direct_striped<BlockSize>(lid, device_keys_output + block_offset, keys);
@@ -87,11 +116,11 @@ __global__ __launch_bounds__(BlockSize) void sort_key_kernel(key_type*    device
     {
         if(descending)
         {
-            bsort.sort_desc(keys, start_bit, end_bit, decomposer);
+            bsort.sort_desc(keys, storage, start_bit, end_bit, decomposer);
         }
         else
         {
-            bsort.sort(keys, start_bit, end_bit, decomposer);
+            bsort.sort(keys, storage, start_bit, end_bit, decomposer);
         }
 
         rocprim::block_store_direct_blocked(lid, device_keys_output + block_offset, keys);
@@ -119,19 +148,25 @@ __global__ __launch_bounds__(BlockSize) void sort_key_value_kernel(key_type*   d
     rocprim::block_load_direct_blocked(lid, device_keys_output + block_offset, keys);
     rocprim::block_load_direct_blocked(lid, device_values_output + block_offset, values);
 
-    rocprim::
-        block_radix_sort<key_type, BlockSize, ItemsPerThread, value_type, 1, 1, RadixBitsPerPass>
-                                              bsort;
+    using block_radix_sort = rocprim::
+        block_radix_sort<key_type, BlockSize, ItemsPerThread, value_type, 1, 1, RadixBitsPerPass>;
+    block_radix_sort                          bsort;
     test_utils::select_decomposer_t<key_type> decomposer{};
+
+    // Share LDS storage between all different sort invocations explicitely.
+    // This resolved local memory allocation exceeding limits when targeting SPIR-V.
+    __shared__ typename block_radix_sort::storage_type storage;
+
+    // Sort differently depending on passed flags.
     if(to_striped)
     {
         if(descending)
         {
-            bsort.sort_desc_to_striped(keys, values, start_bit, end_bit, decomposer);
+            bsort.sort_desc_to_striped(keys, values, storage, start_bit, end_bit, decomposer);
         }
         else
         {
-            bsort.sort_to_striped(keys, values, start_bit, end_bit, decomposer);
+            bsort.sort_to_striped(keys, values, storage, start_bit, end_bit, decomposer);
         }
 
         rocprim::block_store_direct_striped<BlockSize>(lid, device_keys_output + block_offset, keys);
@@ -141,11 +176,11 @@ __global__ __launch_bounds__(BlockSize) void sort_key_value_kernel(key_type*   d
     {
         if(descending)
         {
-            bsort.sort_desc(keys, values, start_bit, end_bit, decomposer);
+            bsort.sort_desc(keys, values, storage, start_bit, end_bit, decomposer);
         }
         else
         {
-            bsort.sort(keys, values, start_bit, end_bit, decomposer);
+            bsort.sort(keys, values, storage, start_bit, end_bit, decomposer);
         }
 
         rocprim::block_store_direct_blocked(lid, device_keys_output + block_offset, keys);
@@ -189,7 +224,7 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
     SCOPED_TRACE(testing::Message() << "with size = " << size);
     SCOPED_TRACE(testing::Message() << "with grid_size = " << grid_size);
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
@@ -200,8 +235,8 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
         auto keys_output = std::make_unique<key_type[]>(size);
         test_utils::generate_random_data_n(keys_output.get(),
                                            size,
-                                           test_utils::generate_limits<key_type>::min(),
-                                           test_utils::generate_limits<key_type>::max(),
+                                           common::generate_limits<key_type>::min(),
+                                           common::generate_limits<key_type>::max(),
                                            rng_engine);
 
         // Calculate expected results on host
@@ -216,16 +251,10 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
         }
 
         // Preparing device
-        key_type* device_keys_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_keys_output, size * sizeof(key_type)));
-
-        HIP_CHECK(hipMemcpy(device_keys_output,
-                            keys_output.get(),
-                            size * sizeof(keys_output[0]),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<key_type> device_keys_output(keys_output, size);
 
         sort_key_kernel<block_size, items_per_thread, radix_bits_per_pass, key_type>
-            <<<dim3(grid_size), dim3(block_size), 0, 0>>>(device_keys_output,
+            <<<dim3(grid_size), dim3(block_size), 0, 0>>>(device_keys_output.get(),
                                                           to_striped,
                                                           descending,
                                                           start_bit,
@@ -233,20 +262,14 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 0>::type
         HIP_CHECK(hipGetLastError());
 
         // Getting results to host
-        HIP_CHECK(hipMemcpy(keys_output.get(),
-                            device_keys_output,
-                            size * sizeof(keys_output[0]),
-                            hipMemcpyDeviceToHost));
+        keys_output = device_keys_output.load_to_unique_ptr();
 
         // Verifying results
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(keys_output.get(),
                                                       keys_output.get() + size,
                                                       expected.begin(),
                                                       expected.end()));
-
-        HIP_CHECK(hipFree(device_keys_output));
     }
-
 }
 
 // Test for radix_sort with keys and values. Also ensures that (block) radix_sort is stable
@@ -288,7 +311,7 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
     SCOPED_TRACE(testing::Message() << "with size = " << size);
     SCOPED_TRACE(testing::Message() << "with grid_size = " << grid_size);
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         seed_type seed_value = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
@@ -299,8 +322,8 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
         auto keys_output = std::make_unique<key_type[]>(size);
         test_utils::generate_random_data_n(keys_output.get(),
                                            size,
-                                           test_utils::generate_limits<key_type>::min(),
-                                           test_utils::generate_limits<key_type>::max(),
+                                           common::generate_limits<key_type>::min(),
+                                           common::generate_limits<key_type>::max(),
                                            rng_engine);
 
         std::vector<value_type> values_output(size);
@@ -332,23 +355,8 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
             values_expected[i] = expected[i].second;
         }
 
-        key_type* device_keys_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_keys_output, size * sizeof(key_type)));
-        value_type* device_values_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_values_output, values_output.size() * sizeof(value_type)));
-
-        HIP_CHECK(hipMemcpy(device_keys_output,
-                            keys_output.get(),
-                            size * sizeof(keys_output[0]),
-                            hipMemcpyHostToDevice));
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_values_output, values_output.data(),
-                values_output.size() * sizeof(typename decltype(values_output)::value_type),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<key_type>   device_keys_output(keys_output, size);
+        common::device_ptr<value_type> device_values_output(values_output);
 
         // Running kernel
         sort_key_value_kernel<block_size,
@@ -356,8 +364,8 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
                               radix_bits_per_pass,
                               key_type,
                               value_type>
-            <<<dim3(grid_size), dim3(block_size), 0, 0>>>(device_keys_output,
-                                                          device_values_output,
+            <<<dim3(grid_size), dim3(block_size), 0, 0>>>(device_keys_output.get(),
+                                                          device_values_output.get(),
                                                           to_striped,
                                                           descending,
                                                           start_bit,
@@ -365,29 +373,15 @@ auto test_block_radix_sort() -> typename std::enable_if<Method == 1>::type
         HIP_CHECK(hipGetLastError());
 
         // Getting results to host
-        HIP_CHECK(hipMemcpy(keys_output.get(),
-                            device_keys_output,
-                            size * sizeof(keys_output[0]),
-                            hipMemcpyDeviceToHost));
-
-        HIP_CHECK(
-            hipMemcpy(
-                values_output.data(), device_values_output,
-                values_output.size() * sizeof(typename decltype(values_output)::value_type),
-                hipMemcpyDeviceToHost
-            )
-        );
+        keys_output   = device_keys_output.load_to_unique_ptr();
+        values_output = device_values_output.load();
 
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(keys_output.get(),
                                                       keys_output.get() + size,
                                                       keys_expected.begin(),
                                                       keys_expected.end()));
         ASSERT_NO_FATAL_FAILURE(test_utils::assert_eq(values_output, values_expected));
-
-        HIP_CHECK(hipFree(device_keys_output));
-        HIP_CHECK(hipFree(device_values_output));
     }
-
 }
 
 // Static for-loop

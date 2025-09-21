@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,20 +22,26 @@
 
 #include "../common_test_header.hpp"
 
-#include "indirect_iterator.hpp"
-#include "test_utils_custom_test_types.hpp"
-#include "test_utils_types.hpp"
+#include "../../common/utils_custom_type.hpp"
 
-#include <rocprim/detail/various.hpp>
+#include "../../common/utils_device_ptr.hpp"
+#include "identity_iterator.hpp"
+#include "test_seed.hpp"
+#include "test_utils_custom_test_types.hpp"
+#include "test_utils_data_generation.hpp"
+#include "test_utils_hipgraphs.hpp"
+
+#include <rocprim/device/config_types.hpp>
+#include <rocprim/device/detail/device_config_helper.hpp>
 #include <rocprim/device/device_adjacent_find.hpp>
-#include <rocprim/iterator/counting_iterator.hpp>
-#include <rocprim/iterator/discard_iterator.hpp>
-#include <rocprim/iterator/transform_iterator.hpp>
+#include <rocprim/functional.hpp>
+#include <rocprim/type_traits.hpp>
 #include <rocprim/types.hpp>
 
 #include <algorithm>
-#include <cstdlib>
+#include <cstddef>
 #include <numeric>
+#include <stdint.h>
 #include <vector>
 
 // Params for tests
@@ -69,8 +75,8 @@ public:
 };
 
 // Custom types
-using custom_int2        = test_utils::custom_test_type<int>;
-using custom_double2     = test_utils::custom_test_type<double>;
+using custom_int2        = common::custom_type<int, int, true>;
+using custom_double2     = common::custom_type<double, double, true>;
 using custom_int64_array = test_utils::custom_test_array_type<std::int64_t, 4>;
 
 // Custom configs
@@ -124,7 +130,7 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
 
     op_type op{};
 
-    for(std::size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(std::size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         const unsigned int seed_value
             = seed_index < random_seeds_count ? rand() : seeds[seed_index - random_seeds_count];
@@ -148,7 +154,7 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
                 first_adj_index
                     = std::min(test_utils::get_random_value<std::size_t>(
                                    0,
-                                   static_cast<size_t>(test_utils::numeric_limits<T>::max()),
+                                   static_cast<size_t>(rocprim::numeric_limits<T>::max()),
                                    seed_value),
                                size - 2);
             }
@@ -159,32 +165,24 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
             std::iota(input.begin(), input.begin() + first_adj_index, 0);
             std::fill(input.begin(), input.end(), first_adj_index);
 
-            T*           d_input;
-            output_type* d_output;
-            HIP_CHECK(
-                test_common_utils::hipMallocHelper(&d_input, input.size() * sizeof(*d_input)));
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_output, sizeof(*d_output)));
-            HIP_CHECK(hipMemcpy(d_input,
-                                input.data(),
-                                input.size() * sizeof(*d_input),
-                                hipMemcpyHostToDevice));
+            common::device_ptr<T>           d_input(input);
+            common::device_ptr<output_type> d_output(1);
 
             const auto output_it
-                = test_utils::wrap_in_identity_iterator<use_indirect_iterator>(d_output);
+                = test_utils::wrap_in_identity_iterator<use_indirect_iterator>(d_output.get());
 
             // Allocate temporary storage
             std::size_t tmp_storage_size;
-            void*       d_tmp_storage = nullptr;
-            HIP_CHECK(::rocprim::adjacent_find<Config>(d_tmp_storage,
+            HIP_CHECK(::rocprim::adjacent_find<Config>(nullptr,
                                                        tmp_storage_size,
-                                                       d_input,
+                                                       d_input.get(),
                                                        output_it,
                                                        size,
                                                        op,
                                                        stream,
                                                        debug_synchronous));
             ASSERT_GT(tmp_storage_size, 0);
-            HIP_CHECK(test_common_utils::hipMallocHelper(&d_tmp_storage, tmp_storage_size));
+            common::device_ptr<void> d_tmp_storage(tmp_storage_size);
 
             test_utils::GraphHelper gHelper;
             if(TestFixture::use_graphs)
@@ -193,9 +191,9 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
             }
 
             // Run
-            HIP_CHECK(::rocprim::adjacent_find<Config>(d_tmp_storage,
+            HIP_CHECK(::rocprim::adjacent_find<Config>(d_tmp_storage.get(),
                                                        tmp_storage_size,
-                                                       d_input,
+                                                       d_input.get(),
                                                        output_it,
                                                        size,
                                                        op,
@@ -211,8 +209,7 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
             HIP_CHECK(hipDeviceSynchronize());
 
             // Allocate memory for output and copy to host side
-            output_type output;
-            HIP_CHECK(hipMemcpy(&output, d_output, sizeof(*d_output), hipMemcpyDeviceToHost));
+            auto output = d_output.load_value_at(0);
 
             // Calculate expected results on host
             const auto expected
@@ -221,11 +218,6 @@ TYPED_TEST(RocprimDeviceAdjacentFindTests, AdjacentFind)
 
             // Check if output values are as expected
             ASSERT_EQ(output, expected);
-
-            // Cleanup
-            HIP_CHECK(hipFree(d_input));
-            HIP_CHECK(hipFree(d_output));
-            HIP_CHECK(hipFree(d_tmp_storage));
 
             if(TestFixture::use_graphs)
             {

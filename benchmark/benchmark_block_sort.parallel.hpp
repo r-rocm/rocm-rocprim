@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,9 @@
 
 #include "benchmark_utils.hpp"
 
+#include "../common/utils_data_generation.hpp"
+#include "../common/utils_device_ptr.hpp"
+
 // Google Benchmark
 #include <benchmark/benchmark.h>
 
@@ -35,20 +38,25 @@
 #include <rocprim/block/block_load_func.hpp>
 #include <rocprim/block/block_sort.hpp>
 #include <rocprim/block/block_store_func.hpp>
+#include <rocprim/config.hpp>
+#include <rocprim/functional.hpp>
 #include <rocprim/type_traits.hpp>
-
-#include <string>
-#include <vector>
+#include <rocprim/types.hpp>
+#include <rocprim/types/tuple.hpp>
 
 #include <cstddef>
+#include <string>
+#include <type_traits>
+#include <vector>
 
-template<class KeyType,
-         class ValueType,
+template<typename KeyType,
+         typename ValueType,
          unsigned int                  BlockSize,
          unsigned int                  ItemsPerThread,
          rocprim::block_sort_algorithm block_sort_algorithm,
          std::enable_if_t<std::is_same<ValueType, rocprim::empty_type>::value, bool> = true>
-__global__ __launch_bounds__(BlockSize) void sort_kernel(const KeyType* input, KeyType* output)
+__global__ __launch_bounds__(BlockSize)
+void sort_kernel(const KeyType* input, KeyType* output)
 {
     const unsigned int lid          = threadIdx.x;
     const unsigned int block_offset = blockIdx.x * ItemsPerThread * BlockSize;
@@ -62,13 +70,14 @@ __global__ __launch_bounds__(BlockSize) void sort_kernel(const KeyType* input, K
     rocprim::block_store_direct_blocked(lid, output + block_offset, keys);
 }
 
-template<class KeyType,
-         class ValueType,
+template<typename KeyType,
+         typename ValueType,
          unsigned int                  BlockSize,
          unsigned int                  ItemsPerThread,
          rocprim::block_sort_algorithm block_sort_algorithm,
          std::enable_if_t<!std::is_same<ValueType, rocprim::empty_type>::value, bool> = true>
-__global__ __launch_bounds__(BlockSize) void sort_kernel(const KeyType* input, KeyType* output)
+__global__ __launch_bounds__(BlockSize)
+void sort_kernel(const KeyType* input, KeyType* output)
 {
     const unsigned int lid          = threadIdx.x;
     const unsigned int block_offset = blockIdx.x * ItemsPerThread * BlockSize;
@@ -95,13 +104,13 @@ __global__ __launch_bounds__(BlockSize) void sort_kernel(const KeyType* input, K
     rocprim::block_store_direct_blocked(lid, output + block_offset, keys);
 }
 
-template<class KeyType,
-         class ValueType,
+template<typename KeyType,
+         typename ValueType,
          unsigned int                  BlockSize,
          unsigned int                  ItemsPerThread,
          rocprim::block_sort_algorithm block_sort_algorithm>
-__global__ __launch_bounds__(BlockSize) void stable_sort_kernel(const KeyType* input,
-                                                                KeyType*       output)
+__global__ __launch_bounds__(BlockSize)
+void stable_sort_kernel(const KeyType* input, KeyType* output)
 {
     const unsigned int lid          = threadIdx.x;
     const unsigned int block_offset = blockIdx.x * ItemsPerThread * BlockSize;
@@ -145,13 +154,13 @@ __global__ __launch_bounds__(BlockSize) void stable_sort_kernel(const KeyType* i
     rocprim::block_store_direct_blocked(lid, output + block_offset, keys);
 }
 
-template<class KeyType,
-         class ValueType,
+template<typename KeyType,
+         typename ValueType,
          unsigned int                  BlockSize,
          unsigned int                  ItemsPerThread,
          rocprim::block_sort_algorithm block_sort_algorithm,
          const bool                    stable = false>
-struct block_sort_benchmark : public config_autotune_interface
+struct block_sort_benchmark : public benchmark_utils::autotune_interface
 {
 private:
     static constexpr bool with_values = !std::is_same<ValueType, rocprim::empty_type>::value;
@@ -187,109 +196,58 @@ public:
             + ",method:" + std::string(get_block_sort_method_name(block_sort_algorithm)) + "}}");
     }
 
-    static constexpr unsigned int batch_size        = 10;
-    static constexpr unsigned int warmup_size       = 5;
-    static constexpr bool         debug_synchronous = false;
-
     static auto dispatch_block_sort(std::false_type /*stable_sort*/,
-                             size_t            size,
-                             const hipStream_t stream,
-                             KeyType*          d_input,
-                             KeyType*          d_output)
+                                    size_t            size,
+                                    const hipStream_t stream,
+                                    KeyType*          d_input,
+                                    KeyType*          d_output)
     {
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(
-                sort_kernel<KeyType, ValueType, BlockSize, ItemsPerThread, block_sort_algorithm>),
-            dim3(size / items_per_block),
-            dim3(BlockSize),
-            0,
-            stream,
-            d_input,
-            d_output);
+        sort_kernel<KeyType, ValueType, BlockSize, ItemsPerThread, block_sort_algorithm>
+            <<<dim3(size / items_per_block), dim3(BlockSize), 0, stream>>>(d_input, d_output);
     }
 
     static auto dispatch_block_sort(std::true_type /*stable_sort*/,
-                             size_t            size,
-                             const hipStream_t stream,
-                             KeyType*          d_input,
-                             KeyType*          d_output)
+                                    size_t            size,
+                                    const hipStream_t stream,
+                                    KeyType*          d_input,
+                                    KeyType*          d_output)
     {
-        hipLaunchKernelGGL(HIP_KERNEL_NAME(stable_sort_kernel<KeyType,
-                                                              ValueType,
-                                                              BlockSize,
-                                                              ItemsPerThread,
-                                                              block_sort_algorithm>),
-                           dim3(size / items_per_block),
-                           dim3(BlockSize),
-                           0,
-                           stream,
-                           d_input,
-                           d_output);
+        stable_sort_kernel<KeyType, ValueType, BlockSize, ItemsPerThread, block_sort_algorithm>
+            <<<dim3(size / items_per_block), dim3(BlockSize), 0, stream>>>(d_input, d_output);
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
         // Calculate the number of elements N
         size_t N = bytes / sizeof(KeyType);
 
         const auto size = items_per_block * ((N + items_per_block - 1) / items_per_block);
 
-        std::vector<KeyType> input = get_random_data<KeyType>(size,
-                                                              generate_limits<KeyType>::min(),
-                                                              generate_limits<KeyType>::max(),
-                                                              seed.get_0());
+        std::vector<KeyType> input
+            = get_random_data<KeyType>(size,
+                                       common::generate_limits<KeyType>::min(),
+                                       common::generate_limits<KeyType>::max(),
+                                       seed.get_0());
 
-        KeyType* d_input;
-        KeyType* d_output;
-        HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_input), size * sizeof(KeyType)));
-        HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_output), size * sizeof(KeyType)));
-        HIP_CHECK(hipMemcpy(d_input, input.data(), size * sizeof(KeyType), hipMemcpyHostToDevice));
+        common::device_ptr<KeyType> d_input(input);
+        common::device_ptr<KeyType> d_output(size);
         HIP_CHECK(hipDeviceSynchronize());
 
         static constexpr auto stable_tag = rocprim::detail::bool_constant<stable>{};
 
-        // HIP events creation
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
+        state.run(
+            [&] { dispatch_block_sort(stable_tag, size, stream, d_input.get(), d_output.get()); });
 
-        // Run
-        for(auto _ : state)
-        {
-            // Record start event
-            HIP_CHECK(hipEventRecord(start, stream));
+        state.set_throughput(size, sizeof(KeyType));
 
-            for(size_t i = 0; i < batch_size; i++)
-            {
-                dispatch_block_sort(stable_tag, size, stream, d_input, d_output);
-            }
-            HIP_CHECK(hipGetLastError());
-
-            // Record stop event and wait until it completes
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds;
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        // Destroy HIP events
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(KeyType));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        state.counters["sorted_size"] = benchmark::Counter(BlockSize * ItemsPerThread,
-                                                           benchmark::Counter::kDefaults,
-                                                           benchmark::Counter::OneK::kIs1024);
-
-        HIP_CHECK(hipFree(d_input));
-        HIP_CHECK(hipFree(d_output));
+        state.gbench_state.counters["sorted_size"]
+            = benchmark::Counter(BlockSize * ItemsPerThread,
+                                 benchmark::Counter::kDefaults,
+                                 benchmark::Counter::OneK::kIs1024);
     }
 };
 

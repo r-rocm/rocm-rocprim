@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2022-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,23 +21,36 @@
 // SOFTWARE.
 
 #include "../common_test_header.hpp"
-#include "rocprim/types.hpp"
+
+#include "../../common/utils.hpp"
+#include "../../common/utils_device_ptr.hpp"
+#include "../../common/warp_exchange.hpp"
+
 #include "test_utils.hpp"
 
+#include <rocprim/config.hpp>
+#include <rocprim/device/config_types.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+#include <rocprim/types.hpp>
 #include <rocprim/warp/warp_exchange.hpp>
 
 #include <algorithm>
-#include <iterator>
-#include <type_traits>
-
+#include <cstddef>
+#include <numeric>
+#include <random>
 #include <stdint.h>
+#include <type_traits>
+#include <vector>
 
-template<class T, unsigned int ItemsPerThread, unsigned int WarpSize, class ExchangeOp = void>
+template<class T,
+         unsigned int ItemsPerThread,
+         unsigned int VirtualWaveSize,
+         class ExchangeOp = void>
 struct Params
 {
     using type = T;
     static constexpr unsigned int items_per_thread = ItemsPerThread;
-    static constexpr unsigned int warp_size = WarpSize;
+    static constexpr unsigned int warp_size        = VirtualWaveSize;
     using exchange_op = ExchangeOp;
 };
 
@@ -48,173 +61,86 @@ public:
     using params = Params;
 };
 
-struct BlockedToStripedOp
-{
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&input_data)[ItemsPerThread],
-                   T (&output_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& storage) const
-    {
-        warp_exchange.blocked_to_striped(input_data, output_data, storage);
-    }
-
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&thread_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& storage) const
-    {
-        warp_exchange.blocked_to_striped(thread_data, thread_data, storage);
-    }
-};
-
-struct BlockedToStripedShuffleOp
-{
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&input_data)[ItemsPerThread],
-                   T (&output_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& /*storage*/) const
-    {
-        warp_exchange.blocked_to_striped_shuffle(input_data, output_data);
-    }
-
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&thread_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& /*storage*/) const
-    {
-        warp_exchange.blocked_to_striped_shuffle(thread_data, thread_data);
-    }
-};
-
-struct StripedToBlockedOp
-{
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&input_data)[ItemsPerThread],
-                   T (&output_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& storage) const
-    {
-        warp_exchange.striped_to_blocked(input_data, output_data, storage);
-    }
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&thread_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& storage) const
-    {
-        warp_exchange.striped_to_blocked(thread_data, thread_data, storage);
-    }
-};
-
-struct StripedToBlockedShuffleOp
-{
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&input_data)[ItemsPerThread],
-                   T (&output_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& /*storage*/) const
-    {
-        warp_exchange.striped_to_blocked_shuffle(input_data, output_data);
-    }
-    template<class T, class warp_exchange_type, unsigned int ItemsPerThread>
-    ROCPRIM_DEVICE ROCPRIM_INLINE void
-        operator()(warp_exchange_type warp_exchange,
-                   T (&thread_data)[ItemsPerThread],
-                   typename warp_exchange_type::storage_type& /*storage*/) const
-    {
-        warp_exchange.striped_to_blocked_shuffle(thread_data, thread_data);
-    }
-};
-
-struct ScatterToStripedOp
-{
-    template<
-        class T,
-        class OffsetT,
-        class warp_exchange_type,
-        unsigned int ItemsPerThread
-    >
-    ROCPRIM_DEVICE ROCPRIM_INLINE
-    void operator()(warp_exchange_type warp_exchange,
-                    T (&thread_data)[ItemsPerThread],
-                    OffsetT (&positions)[ItemsPerThread],
-                    typename warp_exchange_type::storage_type& storage) const
-    {
-        warp_exchange.scatter_to_striped(thread_data, thread_data, positions, storage);
-    }
-};
-
 using WarpExchangeTestParams = ::testing::Types<
-    Params<int, 4U, 8U, BlockedToStripedOp>,
-    Params<int8_t, 4U, 16U, BlockedToStripedOp>,
-    Params<int16_t, 2U, 32U, BlockedToStripedOp>,
-    Params<int64_t, 4U, 64U, BlockedToStripedOp>,
-    Params<float, 4U, 32U, BlockedToStripedOp>,
-    Params<double, 5U, 32U, BlockedToStripedOp>,
+    Params<int, 4U, 8U, common::BlockedToStripedOp>,
+    Params<int8_t, 4U, 16U, common::BlockedToStripedOp>,
+    Params<int16_t, 2U, 32U, common::BlockedToStripedOp>,
+    Params<int64_t, 4U, 64U, common::BlockedToStripedOp>,
+    Params<float, 4U, 32U, common::BlockedToStripedOp>,
+    Params<double, 5U, 32U, common::BlockedToStripedOp>,
     // half should be supported, but is missing some key operators.
     // we should uncomment these, as soon as these are implemented and the tests compile and work as intended.
-    //Params<rocprim::half, 4U, 64U, BlockedToStripedOp>,
-    Params<rocprim::bfloat16, 4U, 8U, BlockedToStripedOp>,
+    //Params<rocprim::half, 4U, 64U, common::BlockedToStripedOp>,
+    Params<rocprim::bfloat16, 4U, 8U, common::BlockedToStripedOp>,
 
-    Params<int, 4U, 8U, BlockedToStripedShuffleOp>,
-    Params<int8_t, 4U, 16U, BlockedToStripedShuffleOp>,
-    Params<int16_t, 2U, 32U, BlockedToStripedShuffleOp>,
-    Params<int64_t, 4U, 8U, BlockedToStripedShuffleOp>,
-    Params<float, 4U, 32U, BlockedToStripedShuffleOp>,
-    Params<double, 4U, 64U, BlockedToStripedShuffleOp>,
-    //Params<rocprim::half, 4U,  8U, BlockedToStripedShuffleOp>,
-    Params<rocprim::bfloat16, 4U, 8U, BlockedToStripedShuffleOp>,
+    Params<int, 4U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<int8_t, 4U, 16U, common::BlockedToStripedShuffleOp>,
+    Params<int16_t, 2U, 32U, common::BlockedToStripedShuffleOp>,
+    Params<int64_t, 4U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<float, 4U, 32U, common::BlockedToStripedShuffleOp>,
+    Params<double, 4U, 64U, common::BlockedToStripedShuffleOp>,
+    //Params<rocprim::half, 4U,  8U, common::BlockedToStripedShuffleOp>,
+    Params<rocprim::bfloat16, 4U, 8U, common::BlockedToStripedShuffleOp>,
 
-    Params<int, 8U, 8U, BlockedToStripedShuffleOp>,
-    Params<int8_t, 16U, 16U, BlockedToStripedShuffleOp>,
-    Params<int16_t, 32U, 32U, BlockedToStripedShuffleOp>,
-    Params<int64_t, 8U, 8U, BlockedToStripedShuffleOp>,
-    Params<float, 32U, 32U, BlockedToStripedShuffleOp>,
-    Params<double, 64U, 64U, BlockedToStripedShuffleOp>,
-    //Params<rocprim::half, 8U,  8U, BlockedToStripedShuffleOp>,
-    Params<rocprim::bfloat16, 8U, 8U, BlockedToStripedShuffleOp>,
+    Params<int, 8U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<int8_t, 16U, 16U, common::BlockedToStripedShuffleOp>,
+    Params<int16_t, 32U, 32U, common::BlockedToStripedShuffleOp>,
+    Params<int64_t, 8U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<float, 32U, 32U, common::BlockedToStripedShuffleOp>,
+    Params<double, 64U, 64U, common::BlockedToStripedShuffleOp>,
+    //Params<rocprim::half, 8U,  8U, common::BlockedToStripedShuffleOp>,
+    Params<rocprim::bfloat16, 8U, 8U, common::BlockedToStripedShuffleOp>,
 
-    Params<int, 4U, 8U, StripedToBlockedOp>,
-    Params<int8_t, 4U, 16U, StripedToBlockedOp>,
-    Params<int16_t, 2U, 32U, StripedToBlockedOp>,
-    Params<int64_t, 4U, 64U, StripedToBlockedOp>,
-    Params<float, 4U, 32U, StripedToBlockedOp>,
-    Params<double, 5U, 32U, StripedToBlockedOp>,
-    //Params<rocprim::half, 4U, 64U, StripedToBlockedOp>,
-    Params<rocprim::bfloat16, 4U, 8U, StripedToBlockedOp>,
+    Params<float, 16U, 64U, common::BlockedToStripedShuffleOp>,
+    Params<double, 8U, 32U, common::BlockedToStripedShuffleOp>,
+    Params<int8_t, 32U, 64U, common::BlockedToStripedShuffleOp>,
+    Params<int, 32U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<int64_t, 64U, 8U, common::BlockedToStripedShuffleOp>,
+    Params<rocprim::bfloat16, 64U, 16U, common::BlockedToStripedShuffleOp>,
+    Params<float, 2U, 16U, common::StripedToBlockedShuffleOp>,
 
-    Params<int, 4U, 8U, StripedToBlockedShuffleOp>,
-    Params<int8_t, 4U, 16U, StripedToBlockedShuffleOp>,
-    Params<int16_t, 2U, 32U, StripedToBlockedShuffleOp>,
-    Params<int64_t, 4U, 8U, StripedToBlockedShuffleOp>,
-    Params<float, 4U, 32U, StripedToBlockedShuffleOp>,
-    Params<double, 4U, 64U, StripedToBlockedShuffleOp>,
-    //Params<rocprim::half, 4U,  8U, StripedToBlockedShuffleOp>,
-    Params<rocprim::bfloat16, 4U, 8U, StripedToBlockedShuffleOp>,
+    Params<int, 4U, 8U, common::StripedToBlockedOp>,
+    Params<int8_t, 4U, 16U, common::StripedToBlockedOp>,
+    Params<int16_t, 2U, 32U, common::StripedToBlockedOp>,
+    Params<int64_t, 4U, 64U, common::StripedToBlockedOp>,
+    Params<float, 4U, 32U, common::StripedToBlockedOp>,
+    Params<double, 5U, 32U, common::StripedToBlockedOp>,
+    //Params<rocprim::half, 4U, 64U, common::StripedToBlockedOp>,
+    Params<rocprim::bfloat16, 4U, 8U, common::StripedToBlockedOp>,
 
-    Params<int, 8U, 8U, StripedToBlockedShuffleOp>,
-    Params<int8_t, 16U, 16U, StripedToBlockedShuffleOp>,
-    Params<int16_t, 32U, 32U, StripedToBlockedShuffleOp>,
-    Params<int64_t, 8U, 8U, StripedToBlockedShuffleOp>,
-    Params<float, 32U, 32U, StripedToBlockedShuffleOp>,
-    Params<double, 64U, 64U, StripedToBlockedShuffleOp>,
-    //Params<rocprim::half, 8U,  8U, StripedToBlockedShuffleOp>,
-    Params<rocprim::bfloat16, 8U, 8U, StripedToBlockedShuffleOp>>;
+    Params<int, 4U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<int8_t, 4U, 16U, common::StripedToBlockedShuffleOp>,
+    Params<int16_t, 2U, 32U, common::StripedToBlockedShuffleOp>,
+    Params<int64_t, 4U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<float, 4U, 32U, common::StripedToBlockedShuffleOp>,
+    Params<double, 4U, 64U, common::StripedToBlockedShuffleOp>,
+    //Params<rocprim::half, 4U,  8U, common::StripedToBlockedShuffleOp>,
+    Params<rocprim::bfloat16, 4U, 8U, common::StripedToBlockedShuffleOp>,
+
+    Params<int, 8U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<int8_t, 16U, 16U, common::StripedToBlockedShuffleOp>,
+    Params<int16_t, 32U, 32U, common::StripedToBlockedShuffleOp>,
+    Params<int64_t, 8U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<float, 32U, 32U, common::StripedToBlockedShuffleOp>,
+    Params<double, 64U, 64U, common::StripedToBlockedShuffleOp>,
+    //Params<rocprim::half, 8U,  8U, common::StripedToBlockedShuffleOp>,
+    Params<rocprim::bfloat16, 8U, 8U, common::StripedToBlockedShuffleOp>,
+
+    Params<float, 16U, 64U, common::StripedToBlockedShuffleOp>,
+    Params<double, 8U, 32U, common::StripedToBlockedShuffleOp>,
+    Params<int8_t, 32U, 64U, common::StripedToBlockedShuffleOp>,
+    Params<int, 32U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<int64_t, 64U, 8U, common::StripedToBlockedShuffleOp>,
+    Params<rocprim::bfloat16, 64U, 16U, common::StripedToBlockedShuffleOp>,
+    Params<float, 2U, 16U, common::StripedToBlockedShuffleOp>>;
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class Op, class T>
-__device__ auto warp_exchange_test(T* d_input, T* d_output)
-    -> std::enable_if_t<test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_test(T* d_input, T* d_output)
+    -> std::enable_if_t<common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {
     using warp_exchange_type         = ::rocprim::warp_exchange<T, ItemsPerThread, LogicalWarpSize>;
-    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::min_size() / LogicalWarpSize;
+    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::max_size() / LogicalWarpSize;
     ROCPRIM_SHARED_MEMORY typename warp_exchange_type::storage_type storage[num_warps];
 
     T thread_data[ItemsPerThread];
@@ -233,16 +159,18 @@ __device__ auto warp_exchange_test(T* d_input, T* d_output)
 }
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class Op, class T>
-__device__ auto warp_exchange_test(T* /*d_input*/, T* /*d_output*/)
-    -> std::enable_if_t<!test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_test(T* /*d_input*/, T* /*d_output*/)
+    -> std::enable_if_t<!common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {}
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class Op, class T>
-__device__ auto warp_exchange_test_not_inplace(T* d_input, T* d_output)
-    -> std::enable_if_t<test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_test_not_inplace(T* d_input, T* d_output)
+    -> std::enable_if_t<common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {
     using warp_exchange_type         = ::rocprim::warp_exchange<T, ItemsPerThread, LogicalWarpSize>;
-    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::min_size() / LogicalWarpSize;
+    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::max_size() / LogicalWarpSize;
     ROCPRIM_SHARED_MEMORY typename warp_exchange_type::storage_type storage[num_warps];
 
     T thread_data[ItemsPerThread];
@@ -263,8 +191,9 @@ __device__ auto warp_exchange_test_not_inplace(T* d_input, T* d_output)
 }
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class Op, class T>
-__device__ auto warp_exchange_test_not_inplace(T* /*d_input*/, T* /*d_output*/)
-    -> std::enable_if_t<!test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_test_not_inplace(T* /*d_input*/, T* /*d_output*/)
+    -> std::enable_if_t<!common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {}
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class Op, class T>
@@ -318,32 +247,25 @@ TYPED_TEST(WarpExchangeTest, WarpExchange)
     std::vector<T> input(items_count);
     std::iota(input.begin(), input.end(), static_cast<T>(0));
     auto expected = input;
-    if(std::is_same<exchange_op, StripedToBlockedOp>::value
-        || std::is_same<exchange_op, StripedToBlockedShuffleOp>::value)
+    if(std::is_same<exchange_op, common::StripedToBlockedOp>::value
+       || std::is_same<exchange_op, common::StripedToBlockedShuffleOp>::value)
     {
         input = stripe_vector(input, warp_size, items_per_thread);
     }
 
-    T* d_input{};
-    HIP_CHECK(hipMalloc(&d_input, items_count * sizeof(T)));
-    HIP_CHECK(hipMemcpy(d_input, input.data(), items_count * sizeof(T), hipMemcpyHostToDevice));
-    T* d_output{};
-    HIP_CHECK(hipMalloc(&d_output, items_count * sizeof(T)));
-    HIP_CHECK(hipMemset(d_output, 0, items_count * sizeof(T)));
+    common::device_ptr<T> d_input(input);
+    common::device_ptr<T> d_output(items_count);
+    HIP_CHECK(hipMemset(d_output.get(), 0, items_count * sizeof(T)));
 
     warp_exchange_kernel<items_per_thread, warp_size, exchange_op>
-        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input, d_output);
+        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input.get(), d_output.get());
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipDeviceSynchronize());
 
-    std::vector<T> output(items_count);
-    HIP_CHECK(hipMemcpy(output.data(), d_output, items_count * sizeof(T), hipMemcpyDeviceToHost));
+    auto output = d_output.load();
 
-    HIP_CHECK(hipFree(d_input));
-    HIP_CHECK(hipFree(d_output));
-
-    if(std::is_same<exchange_op, BlockedToStripedOp>::value
-       || std::is_same<exchange_op, BlockedToStripedShuffleOp>::value)
+    if(std::is_same<exchange_op, common::BlockedToStripedOp>::value
+       || std::is_same<exchange_op, common::BlockedToStripedShuffleOp>::value)
     {
         expected = stripe_vector(expected, warp_size, items_per_thread);
     }
@@ -371,32 +293,25 @@ TYPED_TEST(WarpExchangeTest, WarpExchangeNotInplace)
     std::vector<T> input(items_count);
     std::iota(input.begin(), input.end(), static_cast<T>(0));
     auto expected = input;
-    if(std::is_same<exchange_op, StripedToBlockedOp>::value
-       || std::is_same<exchange_op, StripedToBlockedShuffleOp>::value)
+    if(std::is_same<exchange_op, common::StripedToBlockedOp>::value
+       || std::is_same<exchange_op, common::StripedToBlockedShuffleOp>::value)
     {
         input = stripe_vector(input, warp_size, items_per_thread);
     }
 
-    T* d_input{};
-    HIP_CHECK(hipMalloc(&d_input, items_count * sizeof(T)));
-    HIP_CHECK(hipMemcpy(d_input, input.data(), items_count * sizeof(T), hipMemcpyHostToDevice));
-    T* d_output{};
-    HIP_CHECK(hipMalloc(&d_output, items_count * sizeof(T)));
-    HIP_CHECK(hipMemset(d_output, 0, items_count * sizeof(T)));
+    common::device_ptr<T> d_input(input);
+    common::device_ptr<T> d_output(items_count);
+    HIP_CHECK(hipMemset(d_output.get(), 0, items_count * sizeof(T)));
 
     warp_exchange_kernel<items_per_thread, warp_size, exchange_op>
-        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input, d_output, false);
+        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input.get(), d_output.get(), false);
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipDeviceSynchronize());
 
-    std::vector<T> output(items_count);
-    HIP_CHECK(hipMemcpy(output.data(), d_output, items_count * sizeof(T), hipMemcpyDeviceToHost));
+    auto output = d_output.load();
 
-    HIP_CHECK(hipFree(d_input));
-    HIP_CHECK(hipFree(d_output));
-
-    if(std::is_same<exchange_op, BlockedToStripedOp>::value
-        || std::is_same<exchange_op, BlockedToStripedShuffleOp>::value)
+    if(std::is_same<exchange_op, common::BlockedToStripedOp>::value
+       || std::is_same<exchange_op, common::BlockedToStripedShuffleOp>::value)
     {
         expected = stripe_vector(expected, warp_size, items_per_thread);
     }
@@ -419,12 +334,13 @@ public:
 };
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class T, class OffsetT>
-__device__ auto warp_exchange_scatter_test(T* d_input, T* d_output, OffsetT* d_ranks)
-    -> std::enable_if_t<test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_scatter_test(T* d_input, T* d_output, OffsetT* d_ranks)
+    -> std::enable_if_t<common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {
     using warp_exchange_type = ::rocprim::warp_exchange<T, ItemsPerThread, LogicalWarpSize>;
 
-    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::min_size() / LogicalWarpSize;
+    constexpr unsigned int num_warps = ::rocprim::arch::wavefront::max_size() / LogicalWarpSize;
     ROCPRIM_SHARED_MEMORY typename warp_exchange_type::storage_type storage[num_warps];
 
     T thread_data[ItemsPerThread];
@@ -448,8 +364,9 @@ __device__ auto warp_exchange_scatter_test(T* d_input, T* d_output, OffsetT* d_r
 }
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class T, class OffsetT>
-__device__ auto warp_exchange_scatter_test(T* /*d_input*/, T* /*d_output*/, OffsetT* /*d_ranks*/)
-    -> std::enable_if_t<!test_utils::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
+__device__
+auto warp_exchange_scatter_test(T* /*d_input*/, T* /*d_output*/, OffsetT* /*d_ranks*/)
+    -> std::enable_if_t<!common::device_test_enabled_for_warp_size_v<LogicalWarpSize>>
 {}
 
 template<unsigned int ItemsPerThread, unsigned int LogicalWarpSize, class T, class OffsetT>
@@ -489,27 +406,17 @@ TYPED_TEST(WarpExchangeScatterTest, WarpExchangeScatter)
                    [](const T input_val)
                    { return static_cast<OffsetT>(input_val) % (warp_size * items_per_thread); });
 
-    T* d_input{};
-    HIP_CHECK(hipMalloc(&d_input, items_count * sizeof(T)));
-    HIP_CHECK(hipMemcpy(d_input, input.data(), items_count * sizeof(T), hipMemcpyHostToDevice));
-    T* d_output{};
-    HIP_CHECK(hipMalloc(&d_output, items_count * sizeof(T)));
-    HIP_CHECK(hipMemset(d_output, 0, items_count * sizeof(T)));
-    OffsetT* d_ranks{};
-    HIP_CHECK(hipMalloc(&d_ranks, items_count * sizeof(OffsetT)));
-    HIP_CHECK(hipMemcpy(d_ranks, ranks.data(), items_count * sizeof(OffsetT), hipMemcpyHostToDevice));
+    common::device_ptr<OffsetT> d_ranks(ranks);
+    common::device_ptr<T>       d_input(input);
+    common::device_ptr<T>       d_output(items_count);
+    HIP_CHECK(hipMemset(d_output.get(), 0, items_count * sizeof(T)));
 
     warp_exchange_scatter_kernel<items_per_thread, warp_size>
-        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input, d_output, d_ranks);
+        <<<dim3(1), dim3(block_size), 0, 0>>>(d_input.get(), d_output.get(), d_ranks.get());
     HIP_CHECK(hipGetLastError());
     HIP_CHECK(hipDeviceSynchronize());
 
-    std::vector<T> output(items_count);
-    HIP_CHECK(hipMemcpy(output.data(), d_output, items_count * sizeof(T), hipMemcpyDeviceToHost));
-
-    HIP_CHECK(hipFree(d_input));
-    HIP_CHECK(hipFree(d_output));
-    HIP_CHECK(hipFree(d_ranks));
+    auto output = d_output.load();
 
     ASSERT_EQ(expected, output);
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -39,6 +39,9 @@
 #include "detail/device_scan_common.hpp"
 #include "device_partition_config.hpp"
 #include "device_transform.hpp"
+#include "rocprim/detail/virtual_shared_memory.hpp"
+#include "rocprim/device/config_types.hpp"
+#include "rocprim/device/detail/ordered_block_id.hpp"
 
 BEGIN_ROCPRIM_NAMESPACE
 
@@ -58,51 +61,91 @@ template<select_method SelectMethod,
          class OutputValueIterator,
          class InequalityOp,
          class OffsetLookbackScanState,
+         class BlockIdWrapper,
          class... UnaryPredicates>
-ROCPRIM_KERNEL
-    __launch_bounds__(device_params<Config>().kernel_config.block_size) void partition_kernel(
-        KeyIterator             keys_input,
-        ValueIterator           values_input,
-        FlagIterator            flags,
-        OutputKeyIterator       keys_output,
-        OutputValueIterator     values_output,
-        size_t*                 selected_count,
-        size_t*                 prev_selected_count,
-        size_t                  prev_processed,
-        const size_t            total_size,
-        InequalityOp            inequality_op,
-        OffsetLookbackScanState offset_scan_state,
-        const unsigned int      number_of_blocks,
-        UnaryPredicates... predicates)
+ROCPRIM_KERNEL ROCPRIM_LAUNCH_BOUNDS(device_params<Config>().kernel_config.block_size) void
+    partition_kernel(KeyIterator                        keys_input,
+                     ValueIterator                      values_input,
+                     FlagIterator                       flags,
+                     OutputKeyIterator                  keys_output,
+                     OutputValueIterator                values_output,
+                     size_t*                            selected_count,
+                     size_t*                            prev_selected_count,
+                     size_t                             prev_processed,
+                     const size_t                       total_size,
+                     InequalityOp                       inequality_op,
+                     OffsetLookbackScanState            offset_scan_state,
+                     const unsigned int                 number_of_blocks,
+                     detail::vsmem_t                    vsmem,
+                     BlockIdWrapper                     block_id,
+                     UnaryPredicates... predicates)
 {
-    partition_kernel_impl<SelectMethod, OnlySelected, Config>(keys_input,
-                                                              values_input,
-                                                              flags,
-                                                              keys_output,
-                                                              values_output,
-                                                              selected_count,
-                                                              prev_selected_count,
-                                                              prev_processed,
-                                                              total_size,
-                                                              inequality_op,
-                                                              offset_scan_state,
-                                                              number_of_blocks,
-                                                              predicates...);
+    using offset_type = typename OffsetLookbackScanState::value_type;
+    using key_type    = typename std::iterator_traits<KeyIterator>::value_type;
+    using value_type  = typename std::iterator_traits<ValueIterator>::value_type;
+    using flag_type =
+        typename std::conditional<SelectMethod == select_method::predicated_flag,
+                                  typename std::iterator_traits<FlagIterator>::value_type,
+                                  bool>::type;
+
+    using partition_kernel_impl_t = partition_kernel_impl_<SelectMethod,
+                                                           OnlySelected,
+                                                           Config,
+                                                           key_type,
+                                                           value_type,
+                                                           flag_type,
+                                                           offset_type,
+                                                           BlockIdWrapper>;
+
+    using VSmemHelperT = detail::vsmem_helper_impl<partition_kernel_impl_t>;
+    ROCPRIM_SHARED_MEMORY typename VSmemHelperT::static_temp_storage_t static_temp_storage;
+    // Get temporary storage
+    typename partition_kernel_impl_t::storage_type& storage
+        = VSmemHelperT::get_temp_storage(static_temp_storage, vsmem);
+
+    partition_kernel_impl_t().partition(keys_input,
+                                        values_input,
+                                        flags,
+                                        keys_output,
+                                        values_output,
+                                        selected_count,
+                                        prev_selected_count,
+                                        prev_processed,
+                                        total_size,
+                                        inequality_op,
+                                        offset_scan_state,
+                                        number_of_blocks,
+                                        block_id,
+                                        storage,
+                                        predicates...);
 }
 
-#define ROCPRIM_DETAIL_HIP_SYNC(name, size, start) \
-    if(debug_synchronous) \
-    { \
-        std::cout << name << "(" << size << ")"; \
-        auto error = hipStreamSynchronize(stream); \
-        if(error != hipSuccess) return error; \
-        auto end = std::chrono::steady_clock::now(); \
-        auto d = std::chrono::duration_cast<std::chrono::duration<double>>(end - start); \
-        std::cout << " " << d.count() * 1000 << " ms" << '\n'; \
-    }
+template<select_method SelectMethod,
+         bool          OnlySelected,
+         class Config,
+         class Key,
+         class Value,
+         class FlagType,
+         class OffsetLookbackScanState,
+         class BlockIdWrapper>
+inline size_t get_partition_vsmem_size_per_block()
+{
+    using offset_type             = typename OffsetLookbackScanState::value_type;
+    using partition_kernel_impl_t = partition_kernel_impl_<SelectMethod,
+                                                           OnlySelected,
+                                                           Config,
+                                                           Key,
+                                                           Value,
+                                                           FlagType,
+                                                           offset_type,
+                                                           BlockIdWrapper>;
 
+    using PartitionVSmemHelperT = detail::vsmem_helper_impl<partition_kernel_impl_t>;
+    return PartitionVSmemHelperT::vsmem_per_block;
+}
 
 template<partition_subalgo SubAlgo,
+         bool              UsingOrderedBlockId,
          class Config,
          class OffsetT,
          class KeyIterator,
@@ -190,6 +233,47 @@ inline hipError_t partition_impl(void*                       temporary_storage,
         return result;
     }
 
+    using block_id_wrapper_type = block_id_wrapper<uint32_t, UsingOrderedBlockId>;
+
+    typename block_id_wrapper_type::id_type* block_id_pool = nullptr;
+
+    bool use_sleep;
+    ROCPRIM_RETURN_ON_ERROR(is_sleep_scan_state_used(stream, use_sleep));
+
+    // vsmem size
+    void*  vsmem                      = nullptr;
+    size_t virtual_shared_memory_size = 0;
+    using flag_type =
+        typename std::conditional<method == select_method::predicated_flag,
+                                  typename std::iterator_traits<FlagIterator>::value_type,
+                                  bool>::type;
+    if(use_sleep)
+    {
+        virtual_shared_memory_size
+            = get_partition_vsmem_size_per_block<method,
+                                                 write_only_selected,
+                                                 config,
+                                                 key_type,
+                                                 value_type,
+                                                 flag_type,
+                                                 offset_scan_state_with_sleep_type,
+                                                 block_id_wrapper_type>();
+    }
+    else
+    {
+        virtual_shared_memory_size = get_partition_vsmem_size_per_block<method,
+                                                                        write_only_selected,
+                                                                        config,
+                                                                        key_type,
+                                                                        value_type,
+                                                                        flag_type,
+                                                                        offset_scan_state_type,
+                                                                        block_id_wrapper_type>();
+    }
+    virtual_shared_memory_size *= number_of_blocks;
+
+    // temporary storage partition
+
     result = detail::temp_storage::partition(
         temporary_storage,
         storage_size,
@@ -200,21 +284,22 @@ inline hipError_t partition_impl(void*                       temporary_storage,
             // simultaneously.
             // They have the same base type, so there is no padding between the types.
             detail::temp_storage::ptr_aligned_array(&selected_count, selected_count_size),
-            detail::temp_storage::ptr_aligned_array(&prev_selected_count, selected_count_size)));
+            detail::temp_storage::ptr_aligned_array(&prev_selected_count, selected_count_size),
+            detail::temp_storage::ptr_aligned_array(&block_id_pool, block_id_wrapper_type::get_storage_size()),
+            // vsmem
+            detail::temp_storage::make_partition(&vsmem,
+                                                 virtual_shared_memory_size,
+                                                 cache_line_size)));
+
     if(result != hipSuccess || temporary_storage == nullptr)
     {
         return result;
     }
 
+    auto block_id = block_id_wrapper_type::create(block_id_pool);
+
     // Start point for time measurements
     std::chrono::steady_clock::time_point start;
-
-    bool use_sleep;
-    result = is_sleep_scan_state_used(stream, use_sleep);
-    if(result != hipSuccess)
-    {
-        return result;
-    }
 
     // Create and initialize lookback_scan_state obj
     offset_scan_state_type offset_scan_state{};
@@ -304,6 +389,15 @@ inline hipError_t partition_impl(void*                       temporary_storage,
                                                     current_number_of_blocks,
                                                     start);
 
+        if (UsingOrderedBlockId)
+        {
+            result = hipMemsetAsync(block_id_pool, 0, sizeof(unsigned int), stream);
+            if (result != hipSuccess)
+            {
+                return result;
+            }
+        }
+
         if(debug_synchronous) start = std::chrono::steady_clock::now();
 
         with_scan_state(
@@ -323,6 +417,8 @@ inline hipError_t partition_impl(void*                       temporary_storage,
                         inequality_op,
                         scan_state,
                         current_number_of_blocks,
+                        detail::vsmem_t{vsmem},
+                        block_id,
                         predicates...);
             });
         ROCPRIM_DETAIL_HIP_SYNC_AND_RETURN_ON_ERROR("partition_kernel", size, start);
@@ -344,9 +440,6 @@ inline hipError_t partition_impl(void*                       temporary_storage,
     return hipSuccess;
 }
 
-
-#undef ROCPRIM_DETAIL_HIP_SYNC
-
 } // end of detail namespace
 
 /// \brief Two-way parallel select primitive for device level using selection predicate.
@@ -365,31 +458,34 @@ inline hipError_t partition_impl(void*                       temporary_storage,
 /// * Range specified by \p selected_count_output must have at least 1 element.
 /// * Relative order is preserved.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be a simple
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be a simple
 /// pointer type.
-/// \tparam SelectedOutputIterator - random-access iterator type of the selected output range. It
+/// \tparam SelectedOutputIterator random-access iterator type of the selected output range. It
 /// can be a simple pointer type.
-/// \tparam RejectedOutputIterator - random-access iterator type of the rejected output range. It
+/// \tparam RejectedOutputIterator random-access iterator type of the rejected output range. It
 /// can be a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
-/// \tparam Predicate - type of the selection predicate.
+/// \tparam Predicate type of the selection predicate.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When a null
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When a null
 /// pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [out] output_selected - iterator to the first element in the selected output range.
-/// \param [out] output_rejected - iterator to the first element in the rejected output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [out] output_selected iterator to the first element in the selected output range.
+/// \param [out] output_rejected iterator to the first element in the rejected output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of
 /// \p output_selected ).
-/// \param [in] size - number of elements in the input range.
-/// \param [in] predicate - the unary selection predicate to select values into the select and reject
+/// \param [in] size number of elements in the input range.
+/// \param [in] predicate the unary selection predicate to select values into the select and reject
 /// outputs.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel launch is
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel launch is
 /// forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -450,7 +546,8 @@ template<class Config = default_config,
          class SelectedOutputIterator,
          class RejectedOutputIterator,
          class SelectedCountOutputIterator,
-         class Predicate>
+         class Predicate,
+         bool  UsingOrderedBlockId = false>
 inline hipError_t partition_two_way(void*                       temporary_storage,
                                     size_t&                     storage_size,
                                     InputIterator               input,
@@ -477,6 +574,7 @@ inline hipError_t partition_two_way(void*                       temporary_storag
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
     return detail::partition_impl<detail::partition_subalgo::partition_two_way_predicate,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,
@@ -512,32 +610,35 @@ inline hipError_t partition_two_way(void*                       temporary_storag
 /// * Values of \p flag range should be implicitly convertible to `bool` type.
 /// * The relative order of elements in both output ranges matches the input range.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam FlagIterator - random-access iterator type of the flag range. It can be
+/// \tparam FlagIterator random-access iterator type of the flag range. It can be
 /// a simple pointer type.
-/// \tparam SelectedOutputIterator - random-access iterator type of the selected output range. It
+/// \tparam SelectedOutputIterator random-access iterator type of the selected output range. It
 /// can be a simple pointer type.
-/// \tparam RejectedOutputIterator - random-access iterator type of the rejected output range. It
+/// \tparam RejectedOutputIterator random-access iterator type of the rejected output range. It
 /// can be a simple pointer type
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [in] flags - iterator to the selection flag corresponding to the first element from \p
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [in] flags iterator to the selection flag corresponding to the first element from \p
 /// input range.
-/// \param [out] output_selected - iterator to the first element in the selected output range.
-/// \param [out] output_rejected - iterator to the first element in the rejected output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of
+/// \param [out] output_selected iterator to the first element in the selected output range.
+/// \param [out] output_rejected iterator to the first element in the rejected output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of
 /// \p output_selected).
-/// \param [in] size - number of elements in the input range.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] size number of elements in the input range.
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -590,7 +691,8 @@ template<class Config = default_config,
          typename FlagIterator,
          typename SelectedOutputIterator,
          typename RejectedOutputIterator,
-         typename SelectedCountOutputIterator>
+         typename SelectedCountOutputIterator,
+         bool     UsingOrderedBlockId = false>
 inline hipError_t partition_two_way(void*                       temporary_storage,
                                     size_t&                     storage_size,
                                     InputIterator               input,
@@ -615,6 +717,7 @@ inline hipError_t partition_two_way(void*                       temporary_storag
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
     return detail::partition_impl<detail::partition_subalgo::partition_two_way_flag,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,
@@ -647,27 +750,30 @@ inline hipError_t partition_two_way(void*                       temporary_storag
 /// * Relative order is preserved for the elements for which the corresponding values from \p flags
 /// are \p true. Other elements are copied in reverse order.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam FlagIterator - random-access iterator type of the flag range. It can be
+/// \tparam FlagIterator random-access iterator type of the flag range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [in] flags - iterator to the selection flag corresponding to the first element from \p input range.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of elements in the input range.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [in] flags iterator to the selection flag corresponding to the first element from \p input range.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of elements in the input range.
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -714,8 +820,8 @@ template<
     class InputIterator,
     class FlagIterator,
     class OutputIterator,
-    class SelectedCountOutputIterator
->
+    class SelectedCountOutputIterator,
+    bool  UsingOrderedBlockId = false>
 inline
 hipError_t partition(void * temporary_storage,
                      size_t& storage_size,
@@ -739,20 +845,22 @@ hipError_t partition(void * temporary_storage,
     using output_value_iterator_tuple = tuple<::rocprim::empty_type*, ::rocprim::empty_type*>;
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
-    return detail::partition_impl<detail::partition_subalgo::partition_flag, Config, offset_type>(
-        temporary_storage,
-        storage_size,
-        input,
-        no_input_values,
-        flags,
-        keys_output,
-        no_output_values,
-        selected_count_output,
-        size,
-        inequality_op_type(),
-        stream,
-        debug_synchronous,
-        unary_predicate_type());
+    return detail::partition_impl<detail::partition_subalgo::partition_flag,
+                                  UsingOrderedBlockId,
+                                  Config,
+                                  offset_type>(temporary_storage,
+                                               storage_size,
+                                               input,
+                                               no_input_values,
+                                               flags,
+                                               keys_output,
+                                               no_output_values,
+                                               selected_count_output,
+                                               size,
+                                               inequality_op_type(),
+                                               stream,
+                                               debug_synchronous,
+                                               unary_predicate_type());
 }
 
 /// \brief Parallel select primitive for device level using selection predicate.
@@ -768,30 +876,33 @@ hipError_t partition(void * temporary_storage,
 /// * Relative order is preserved for the elements for which the \p predicate returns \p true. Other
 /// elements are copied in reverse order.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam OutputIterator - random-access iterator type of the output range. It can be
+/// \tparam OutputIterator random-access iterator type of the output range. It can be
 /// a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
-/// \tparam UnaryPredicate - type of a unary selection predicate.
+/// \tparam UnaryPredicate type of a unary selection predicate.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [out] output - iterator to the first element in the output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values (length of \p output).
-/// \param [in] size - number of elements in the input range.
-/// \param [in] predicate - unary function object which returns \p true if the element should be
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [out] output iterator to the first element in the output range.
+/// \param [out] selected_count_output iterator to the total number of selected values (length of \p output).
+/// \param [in] size number of elements in the input range.
+/// \param [in] predicate unary function object which returns \p true if the element should be
 /// ordered before other elements.
 /// The signature of the function should be equivalent to the following:
 /// <tt>bool f(const T &a);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -845,8 +956,8 @@ template<
     class InputIterator,
     class OutputIterator,
     class SelectedCountOutputIterator,
-    class UnaryPredicate
->
+    class UnaryPredicate,
+    bool  UsingOrderedBlockId = false>
 inline
 hipError_t partition(void * temporary_storage,
                      size_t& storage_size,
@@ -873,6 +984,7 @@ hipError_t partition(void * temporary_storage,
     const output_value_iterator_tuple no_output_values{nullptr, nullptr}; // key only
 
     return detail::partition_impl<detail::partition_subalgo::partition_predicate,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,
@@ -913,43 +1025,46 @@ hipError_t partition(void * temporary_storage,
 /// minus the number of elements written to \p output_first_part minus the number of elements written
 /// to \p output_second_part.
 ///
-/// \tparam Config - [optional] Configuration of the primitive, must be `default_config` or `select_config`.
-/// \tparam InputIterator - random-access iterator type of the input range. It can be
+/// \tparam Config [optional] Configuration of the primitive, must be `default_config` or `select_config`.
+/// \tparam InputIterator random-access iterator type of the input range. It can be
 /// a simple pointer type.
-/// \tparam FirstOutputIterator - random-access iterator type of the first output range. It can be
+/// \tparam FirstOutputIterator random-access iterator type of the first output range. It can be
 /// a simple pointer type.
-/// \tparam SecondOutputIterator - random-access iterator type of the second output range. It can be
+/// \tparam SecondOutputIterator random-access iterator type of the second output range. It can be
 /// a simple pointer type.
-/// \tparam UnselectedOutputIterator - random-access iterator type of the unselected output range.
+/// \tparam UnselectedOutputIterator random-access iterator type of the unselected output range.
 /// It can be a simple pointer type.
-/// \tparam SelectedCountOutputIterator - random-access iterator type of the selected_count_output
+/// \tparam SelectedCountOutputIterator random-access iterator type of the selected_count_output
 /// value. It can be a simple pointer type.
-/// \tparam FirstUnaryPredicate - type of the first unary selection predicate.
-/// \tparam SecondUnaryPredicate - type of the second unary selection predicate.
+/// \tparam FirstUnaryPredicate type of the first unary selection predicate.
+/// \tparam SecondUnaryPredicate type of the second unary selection predicate.
+/// \tparam UsingOrderedBlockId If true, uses an atomic counter to assign block id instead of natural
+/// blockIdx-based ordering.  Can increase performance on MI3xx architectures when using streams. The
+/// default is false.
 ///
-/// \param [in] temporary_storage - pointer to a device-accessible temporary storage. When
+/// \param [in] temporary_storage pointer to a device-accessible temporary storage. When
 /// a null pointer is passed, the required allocation size (in bytes) is written to
 /// \p storage_size and function returns without performing the select operation.
-/// \param [in,out] storage_size - reference to a size (in bytes) of \p temporary_storage.
-/// \param [in] input - iterator to the first element in the range to select values from.
-/// \param [out] output_first_part - iterator to the first element in the first output range.
-/// \param [out] output_second_part - iterator to the first element in the second output range.
-/// \param [out] output_unselected - iterator to the first element in the unselected output range.
-/// \param [out] selected_count_output - iterator to the total number of selected values in
+/// \param [in,out] storage_size reference to a size (in bytes) of \p temporary_storage.
+/// \param [in] input iterator to the first element in the range to select values from.
+/// \param [out] output_first_part iterator to the first element in the first output range.
+/// \param [out] output_second_part iterator to the first element in the second output range.
+/// \param [out] output_unselected iterator to the first element in the unselected output range.
+/// \param [out] selected_count_output iterator to the total number of selected values in
 /// \p output_first_part and \p output_second_part respectively.
-/// \param [in] size - number of elements in the input range.
-/// \param [in] select_first_part_op - unary function object which returns \p true if the element
+/// \param [in] size number of elements in the input range.
+/// \param [in] select_first_part_op unary function object which returns \p true if the element
 /// should be in \p output_first_part range
 /// The signature of the function should be equivalent to the following:
 /// <tt>bool f(const T &a);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but function object must not modify the object passed to it.
-/// \param [in] select_second_part_op - unary function object which returns \p true if the element
+/// \param [in] select_second_part_op unary function object which returns \p true if the element
 /// should be in \p output_second_part range (given that \p select_first_part_op returned \p false)
 /// The signature of the function should be equivalent to the following:
 /// <tt>bool f(const T &a);</tt>. The signature does not need to have
 /// <tt>const &</tt>, but function object must not modify the object passed to it.
-/// \param [in] stream - [optional] HIP stream object. The default is \p 0 (default stream).
-/// \param [in] debug_synchronous - [optional] If true, synchronization after every kernel
+/// \param [in] stream [optional] HIP stream object. The default is \p 0 (default stream).
+/// \param [in] debug_synchronous [optional] If true, synchronization after every kernel
 /// launch is forced in order to check for errors. The default value is \p false.
 ///
 /// \par Example
@@ -1022,7 +1137,8 @@ template <
     typename UnselectedOutputIterator,
     typename SelectedCountOutputIterator,
     typename FirstUnaryPredicate,
-    typename SecondUnaryPredicate>
+    typename SecondUnaryPredicate,
+    bool     UsingOrderedBlockId = false>
 inline
 hipError_t partition_three_way(void * temporary_storage,
                                size_t& storage_size,
@@ -1055,6 +1171,7 @@ hipError_t partition_three_way(void * temporary_storage,
     output_key_iterator_tuple output{ output_first_part, output_second_part, output_unselected };
 
     return detail::partition_impl<detail::partition_subalgo::partition_three_way,
+                                  UsingOrderedBlockId,
                                   Config,
                                   offset_type>(temporary_storage,
                                                storage_size,

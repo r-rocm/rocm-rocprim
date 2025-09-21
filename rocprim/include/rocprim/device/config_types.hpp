@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2018-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -37,10 +37,9 @@
 BEGIN_ROCPRIM_NAMESPACE
 
 /// \brief Special type used to show that the given device-level operation
-/// will be executed with optimal configuration dependent on types of the function's parameters
-/// and the target device architecture specified by ROCPRIM_TARGET_ARCH.
-/// Algorithms supporting dynamic dispatch will ignore ROCPRIM_TARGET_ARCH and
-/// launch using optimal configuration based on the target architecture derived from the stream.
+/// will be executed with optimal configuration dependent on types of the function's parameters.
+/// With dynamic dispatch algorithms will launch using optimal configuration based on the target
+/// architecture derived from the stream.
 struct default_config
 {
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
@@ -75,8 +74,8 @@ struct kernel_config_params
 
 /// \brief Configuration of particular kernels launched by device-level operation
 ///
-/// \tparam BlockSize - number of threads in a block.
-/// \tparam ItemsPerThread - number of items processed by each thread.
+/// \tparam BlockSize number of threads in a block.
+/// \tparam ItemsPerThread number of items processed by each thread.
 template<unsigned int BlockSize,
          unsigned int ItemsPerThread,
          unsigned int SizeLimit = ROCPRIM_GRID_SIZE_LIMIT>
@@ -95,61 +94,62 @@ struct kernel_config : detail::kernel_config_params
 namespace detail
 {
 
-template<
-    unsigned int MaxBlockSize,
-    unsigned int SharedMemoryPerThread,
-    // Most kernels require block sizes not smaller than warp
-    unsigned int MinBlockSize, 
-    // If kernels require more than MaxBlockSize * SharedMemoryPerThread bytes
-    // (eg. to store some kind of block-wide state), that size can be specified here
-    unsigned int ExtraSharedMemory = 0,
-    // Can fit in shared memory?
-    // Although GPUs have 64KiB, 32KiB is used here as a "soft" limit,
-    // because some additional memory may be required in kernels
-    bool = (MaxBlockSize * SharedMemoryPerThread + ExtraSharedMemory <= (1u << 15))
->
+template<unsigned int MaxBlockSize,
+         unsigned int SharedMemoryPerThread,
+         // Most kernels require block sizes not smaller than warp
+         unsigned int MinBlockSize,
+         // If kernels require more than MaxBlockSize * SharedMemoryPerThread bytes
+         // (eg. to store some kind of block-wide state), that size can be specified here
+         unsigned int ExtraSharedMemory = 0,
+         // virtual shared memory support
+         bool VsmemSupport = false,
+         // Can fit in shared memory?
+         // Although GPUs have 64KiB, 32KiB is used here as a "soft" limit,
+         // because some additional memory may be required in kernels
+         bool = (MaxBlockSize * SharedMemoryPerThread + ExtraSharedMemory <= (1u << 15))>
 struct limit_block_size
 {
     // No, then try to decrease block size
-    static constexpr unsigned int value =
-        limit_block_size<
-            detail::next_power_of_two(MaxBlockSize) / 2,
-            SharedMemoryPerThread,
-            MinBlockSize,
-            ExtraSharedMemory
-        >::value;
+    static constexpr unsigned int value
+        = limit_block_size<detail::next_power_of_two(MaxBlockSize) / 2,
+                           SharedMemoryPerThread,
+                           MinBlockSize,
+                           ExtraSharedMemory,
+                           VsmemSupport>::value;
 };
 
-template<
-    unsigned int MaxBlockSize,
-    unsigned int SharedMemoryPerThread,
-    unsigned int MinBlockSize,
-    unsigned int ExtraSharedMemory
->
-struct limit_block_size<MaxBlockSize, SharedMemoryPerThread, MinBlockSize, ExtraSharedMemory, true>
+template<unsigned int MaxBlockSize,
+         unsigned int SharedMemoryPerThread,
+         unsigned int MinBlockSize,
+         unsigned int ExtraSharedMemory,
+         bool         VsmemSupport>
+struct limit_block_size<MaxBlockSize,
+                        SharedMemoryPerThread,
+                        MinBlockSize,
+                        ExtraSharedMemory,
+                        VsmemSupport,
+                        true>
 {
-    static_assert(MaxBlockSize >= MinBlockSize, "Data is too large, it cannot fit in shared memory");
+    static_assert(MaxBlockSize >= MinBlockSize || VsmemSupport,
+                  "Data is too large, it cannot fit in shared memory");
 
     static constexpr unsigned int value = MaxBlockSize;
 };
 
-template<unsigned int Arch, class T>
-struct select_arch_case
+template<unsigned int MaxBlockSize,
+         unsigned int SharedMemoryPerThread,
+         unsigned int MinBlockSize,
+         unsigned int ExtraSharedMemory = 0>
+struct fallback_block_size
 {
-    static constexpr unsigned int arch = Arch;
-    using type = T;
+
+    static constexpr unsigned int fallback_bs = limit_block_size<MaxBlockSize,
+                                                                 SharedMemoryPerThread,
+                                                                 MinBlockSize,
+                                                                 ExtraSharedMemory,
+                                                                 true>::value;
+    static constexpr unsigned int value = fallback_bs >= MinBlockSize ? fallback_bs : MaxBlockSize;
 };
-
-template<unsigned int TargetArch, class Case, class... OtherCases>
-struct select_arch
-    : std::conditional<
-        Case::arch == TargetArch,
-        extract_type<typename Case::type>,
-        select_arch<TargetArch, OtherCases...>
-    >::type { };
-
-template<unsigned int TargetArch, class Universal>
-struct select_arch<TargetArch, Universal> : extract_type<Universal> { };
 
 template<class Config, class Default>
 using default_or_custom_config =
@@ -255,7 +255,7 @@ constexpr target_arch get_target_arch_from_name(const char* const arch_name, con
  */
 constexpr target_arch device_target_arch()
 {
-#if defined(__amdgcn_processor__)
+#if defined(__amdgcn_processor__) && !defined(ROCPRIM_EXPERIMENTAL_SPIRV)
     // The terminating zero is not counted in the length of the string
     return get_target_arch_from_name(__amdgcn_processor__,
                                      sizeof(__amdgcn_processor__) - sizeof('\0'));
@@ -265,10 +265,12 @@ constexpr target_arch device_target_arch()
 }
 
 template<class Config>
-auto dispatch_target_arch(const target_arch target_arch)
+auto dispatch_target_arch([[maybe_unused]] const target_arch target_arch)
 {
+#if !defined(ROCPRIM_EXPERIMENTAL_SPIRV)
     switch(target_arch)
     {
+
         case target_arch::unknown:
             return Config::template architecture_config<target_arch::unknown>::params;
         case target_arch::gfx803:
@@ -296,6 +298,7 @@ auto dispatch_target_arch(const target_arch target_arch)
         case target_arch::invalid:
             assert(false && "Invalid target architecture selected at runtime.");
     }
+#endif
     return Config::template architecture_config<target_arch::unknown>::params;
 }
 
@@ -358,7 +361,7 @@ inline hipError_t get_device_from_stream(const hipStream_t stream, int& device_i
     const bool is_legacy_stream = false;
 #endif
 
-    if (stream == default_stream || stream == hipStreamPerThread || is_legacy_stream);
+    if (stream == default_stream || stream == hipStreamPerThread || is_legacy_stream)
     {
         const hipError_t result = hipGetDevice(&device_id);
         if(result != hipSuccess)
@@ -396,28 +399,30 @@ inline hipError_t host_target_arch(const hipStream_t stream, target_arch& arch)
 
 /// \brief Returns a number of threads in a hardware warp for the actual device.
 /// At host side this constant is available at runtime only.
-/// \param device_id - the device that should be queried.
-/// \param warp_size - out parameter for the warp size.
+/// \param device_id the device that should be queried.
+/// \param warp_size out parameter for the warp size.
 /// \return hipError_t any error that might occur.
 ///
 /// It is constant for a device.
-ROCPRIM_HOST inline hipError_t host_warp_size(const int device_id, unsigned int& warp_size)
+ROCPRIM_HOST
+inline hipError_t host_warp_size(const int device_id, unsigned int& warp_size)
 {
     warp_size = -1;
-    hipDeviceProp_t device_prop;
-    hipError_t      success = hipGetDeviceProperties(&device_prop, device_id);
+    int        warp_size_attribute{};
+    hipError_t success
+        = hipDeviceGetAttribute(&warp_size_attribute, hipDeviceAttributeWarpSize, device_id);
 
     if(success == hipSuccess)
     {
-        warp_size = device_prop.warpSize;
+        warp_size = static_cast<unsigned int>(warp_size_attribute);
     }
     return success;
 };
 
 /// \brief Returns the number of threads in a hardware warp for the device associated with the stream.
 /// At host side this constant is available at runtime only.
-/// \param stream - the stream, whose device should be queried.
-/// \param warp_size - out parameter for the warp size.
+/// \param stream the stream, whose device should be queried.
+/// \param warp_size out parameter for the warp size.
 /// \return hipError_t any error that might occur.
 ///
 /// It is constant for a device.

@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,44 +21,24 @@
 // SOFTWARE.
 
 #include "benchmark_utils.hpp"
-// CmdParser
-#include "cmdparser.hpp"
 
-// Google Benchmark
-#include <benchmark/benchmark.h>
+#include "../common/utils_device_ptr.hpp"
 
 // HIP API
 #include <hip/hip_runtime.h>
 
 // rocPRIM
 #include <rocprim/block/block_histogram.hpp>
-#include <rocprim/block/block_load_func.hpp>
-#include <rocprim/block/block_store_func.hpp>
+#include <rocprim/config.hpp>
+#include <rocprim/types.hpp>
 
-#include <iostream>
-#include <limits>
-#include <string>
-#include <vector>
-
-#include <cstdio>
-#include <cstdlib>
-
-#ifndef DEFAULT_N
-const size_t DEFAULT_BYTES = 1024 * 1024 * 128 * 4;
-#endif
-
-namespace rp = rocprim;
-
-template<
-    class Runner,
-    class T,
-    unsigned int BlockSize,
-    unsigned int ItemsPerThread,
-    unsigned int BinSize,
-    unsigned int Trials
->
-__global__
-__launch_bounds__(BlockSize)
+template<typename Runner,
+         typename T,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         unsigned int BinSize,
+         unsigned int Trials>
+__global__ __launch_bounds__(BlockSize)
 void kernel(const T* input, T* output)
 {
     Runner::template run<T, BlockSize, ItemsPerThread, BinSize, Trials>(input, output);
@@ -67,42 +47,42 @@ void kernel(const T* input, T* output)
 template<rocprim::block_histogram_algorithm algorithm>
 struct histogram
 {
-    template<
-        class T,
-        unsigned int BlockSize,
-        unsigned int ItemsPerThread,
-        unsigned int BinSize,
-        unsigned int Trials
-    >
+    static constexpr auto algorithm_type = algorithm;
+    template<typename T,
+             unsigned int BlockSize,
+             unsigned int ItemsPerThread,
+             unsigned int BinSize,
+             unsigned int Trials>
     __device__
     static void run(const T* input, T* output)
     {
         // TODO: Move global_offset into final loop
         const unsigned int index = ((blockIdx.x * BlockSize) + threadIdx.x) * ItemsPerThread;
-        unsigned int global_offset = blockIdx.x * BinSize;
+        unsigned int       global_offset = blockIdx.x * BinSize;
 
         T values[ItemsPerThread];
-        for(unsigned int k = 0; k < ItemsPerThread; k++)
+        for(unsigned int k = 0; k < ItemsPerThread; ++k)
         {
             values[k] = input[index + k];
         }
 
-        using bhistogram_t =  rp::block_histogram<T, BlockSize, ItemsPerThread, BinSize, algorithm>;
+        using bhistogram_t
+            = rocprim::block_histogram<T, BlockSize, ItemsPerThread, BinSize, algorithm>;
         __shared__ T histogram[BinSize];
         __shared__ typename bhistogram_t::storage_type storage;
 
         ROCPRIM_NO_UNROLL
-        for(unsigned int trial = 0; trial < Trials; trial++)
+        for(unsigned int trial = 0; trial < Trials; ++trial)
         {
             bhistogram_t().histogram(values, histogram, storage);
-            for(unsigned int k = 0; k < ItemsPerThread; k++)
+            for(unsigned int k = 0; k < ItemsPerThread; ++k)
             {
                 values[k] = BinSize - 1 - values[k];
             }
         }
 
         ROCPRIM_UNROLL
-        for (unsigned int offset = 0; offset < BinSize; offset += BlockSize)
+        for(unsigned int offset = 0; offset < BinSize; offset += BlockSize)
         {
             if(offset + threadIdx.x < BinSize)
             {
@@ -113,161 +93,94 @@ struct histogram
     }
 };
 
-template<
-    class Benchmark,
-    class T,
-    unsigned int BlockSize,
-    unsigned int ItemsPerThread,
-    unsigned int BinSize = BlockSize,
-    unsigned int Trials = 100
->
-void run_benchmark(benchmark::State& state, hipStream_t stream, size_t bytes)
+template<typename Benchmark,
+         typename T,
+         unsigned int BlockSize,
+         unsigned int ItemsPerThread,
+         unsigned int BinSize = BlockSize,
+         unsigned int Trials  = 100>
+void run_benchmark(benchmark_utils::state&& state)
 {
+    const auto& stream = state.stream;
+    const auto& bytes  = state.bytes;
+
     // Calculate the number of elements N
     size_t N = bytes / sizeof(T);
     // Make sure size is a multiple of BlockSize
     constexpr auto items_per_block = BlockSize * ItemsPerThread;
-    const auto size = items_per_block * ((N + items_per_block - 1)/items_per_block);
-    const auto bin_size = BinSize * ((N + items_per_block - 1)/items_per_block);
+    const auto     size     = items_per_block * ((N + items_per_block - 1) / items_per_block);
+    const auto     bin_size = BinSize * ((N + items_per_block - 1) / items_per_block);
     // Allocate and fill memory
     std::vector<T> input(size, 0.0f);
-    T * d_input;
-    T * d_output;
-    HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_input), size * sizeof(T)));
-    HIP_CHECK(hipMalloc(reinterpret_cast<void**>(&d_output), bin_size * sizeof(T)));
-    HIP_CHECK(
-        hipMemcpy(
-            d_input, input.data(),
-            size * sizeof(T),
-            hipMemcpyHostToDevice
-        )
-    );
+    common::device_ptr<T> d_input(input);
+    common::device_ptr<T> d_output(bin_size);
     HIP_CHECK(hipDeviceSynchronize());
 
-    // HIP events creation
-    hipEvent_t start, stop;
-    HIP_CHECK(hipEventCreate(&start));
-    HIP_CHECK(hipEventCreate(&stop));
-
-    for (auto _ : state)
-    {
-        // Record start event
-        HIP_CHECK(hipEventRecord(start, stream));
-
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(kernel<Benchmark, T, BlockSize, ItemsPerThread, BinSize, Trials>),
-            dim3(size/items_per_block), dim3(BlockSize), 0, stream,
-            d_input, d_output
-        );
-        HIP_CHECK(hipGetLastError());
-
-        // Record stop event and wait until it completes
-        HIP_CHECK(hipEventRecord(stop, stream));
-        HIP_CHECK(hipEventSynchronize(stop));
-
-        float elapsed_mseconds;
-        HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-        state.SetIterationTime(elapsed_mseconds / 1000);
-    }
-
-    // Destroy HIP events
-    HIP_CHECK(hipEventDestroy(start));
-    HIP_CHECK(hipEventDestroy(stop));
-
-    state.SetBytesProcessed(state.iterations() * size * sizeof(T) * Trials);
-    state.SetItemsProcessed(state.iterations() * size * Trials);
-
-    HIP_CHECK(hipFree(d_input));
-    HIP_CHECK(hipFree(d_output));
-}
-
-// IPT - items per thread
-#define CREATE_BENCHMARK(T, BS, IPT)                                                       \
-    benchmark::RegisterBenchmark(                                                          \
-        bench_naming::format_name("{lvl:block,algo:histogram,key_type:" #T ",cfg:{bs:" #BS \
-                                  ",ipt:" #IPT ",method:"                                  \
-                                  + method_name + "}}")                                    \
-            .c_str(),                                                                      \
-        run_benchmark<Benchmark, T, BS, IPT>,                                              \
-        stream,                                                                            \
-        bytes)
-
-#define BENCHMARK_TYPE(type, block) \
-    CREATE_BENCHMARK(type, block, 1), \
-    CREATE_BENCHMARK(type, block, 2), \
-    CREATE_BENCHMARK(type, block, 3), \
-    CREATE_BENCHMARK(type, block, 4), \
-    CREATE_BENCHMARK(type, block, 8), \
-    CREATE_BENCHMARK(type, block, 16)
-
-template<class Benchmark>
-void add_benchmarks(std::vector<benchmark::internal::Benchmark*>& benchmarks,
-                    const std::string&                            method_name,
-                    hipStream_t                                   stream,
-                    size_t                                        bytes)
-{
-    std::vector<benchmark::internal::Benchmark*> new_benchmarks =
-    {
-        BENCHMARK_TYPE(int, 256),
-        BENCHMARK_TYPE(int, 320),
-        BENCHMARK_TYPE(int, 512),
-
-        BENCHMARK_TYPE(unsigned long long, 256),
-        BENCHMARK_TYPE(unsigned long long, 320)
-    };
-    benchmarks.insert(benchmarks.end(), new_benchmarks.begin(), new_benchmarks.end());
-}
-
-int main(int argc, char *argv[])
-{
-    cli::Parser parser(argc, argv);
-    parser.set_optional<size_t>("size", "size", DEFAULT_BYTES, "number of bytes");
-    parser.set_optional<int>("trials", "trials", -1, "number of iterations");
-    parser.set_optional<std::string>("name_format",
-                                     "name_format",
-                                     "human",
-                                     "either: json,human,txt");
-    parser.run_and_exit_if_error();
-
-    // Parse argv
-    benchmark::Initialize(&argc, argv);
-    const size_t bytes = parser.get<size_t>("size");
-    const int trials = parser.get<int>("trials");
-    bench_naming::set_format(parser.get<std::string>("name_format"));
-
-    // HIP
-    hipStream_t stream = 0; // default
-
-    // Benchmark info
-    add_common_benchmark_info();
-    benchmark::AddCustomContext("bytes", std::to_string(bytes));
-
-    // Add benchmarks
-    std::vector<benchmark::internal::Benchmark*> benchmarks;
-    // using_atomic
-    using histogram_a_t = histogram<rocprim::block_histogram_algorithm::using_atomic>;
-    add_benchmarks<histogram_a_t>(benchmarks, "using_atomic", stream, bytes);
-    // using_sort
-    using histogram_s_t = histogram<rocprim::block_histogram_algorithm::using_sort>;
-    add_benchmarks<histogram_s_t>(benchmarks, "using_sort", stream, bytes);
-
-    // Use manual timing
-    for(auto& b : benchmarks)
-    {
-        b->UseManualTime();
-        b->Unit(benchmark::kMillisecond);
-    }
-
-    // Force number of iterations
-    if(trials > 0)
-    {
-        for(auto& b : benchmarks)
+    state.run(
+        [&]
         {
-            b->Iterations(trials);
-        }
-    }
+            kernel<Benchmark, T, BlockSize, ItemsPerThread, BinSize, Trials>
+                <<<dim3(size / items_per_block), dim3(BlockSize), 0, stream>>>(d_input.get(),
+                                                                               d_output.get());
+            HIP_CHECK(hipGetLastError());
+        });
 
-    // Run benchmarks
-    benchmark::RunSpecifiedBenchmarks();
-    return 0;
+    state.set_throughput(size * Trials, sizeof(T));
+}
+
+#define CREATE_BENCHMARK(Benchmark, method, T, BS, IPT)                                  \
+    executor.queue_fn(bench_naming::format_name("{lvl:block,algo:histogram,key_type:" #T \
+                                                ",cfg:{bs:" #BS ",ipt:" #IPT ",method:"  \
+                                                + std::string(method) + "}}")            \
+                          .c_str(),                                                      \
+                      run_benchmark<Benchmark, T, BS, IPT>);
+
+#define BENCHMARK_TYPE(Benchmark, method, T, BS)  \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 1) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 2) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 3) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 4) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 8) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 16)
+
+#define BENCHMARK_TYPE_128(Benchmark, method, T, BS) \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 1)    \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 2)    \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 3)    \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 4)    \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 8)    \
+    CREATE_BENCHMARK(Benchmark, method, T, BS, 12)
+
+#define BENCHMARK_ATOMIC()                                                      \
+    BENCHMARK_TYPE(histogram_atomic_t, "using_atomic", int, 256)                \
+    BENCHMARK_TYPE(histogram_atomic_t, "using_atomic", int, 320)                \
+    BENCHMARK_TYPE(histogram_atomic_t, "using_atomic", int, 512)                \
+                                                                                \
+    BENCHMARK_TYPE(histogram_atomic_t, "using_atomic", unsigned long long, 256) \
+    BENCHMARK_TYPE(histogram_atomic_t, "using_atomic", unsigned long long, 320)
+
+#define BENCHMARK_SORT()                                                       \
+    BENCHMARK_TYPE(histogram_sort_t, "using_sort", int, 256)                   \
+    BENCHMARK_TYPE(histogram_sort_t, "using_sort", int, 320)                   \
+    BENCHMARK_TYPE(histogram_sort_t, "using_sort", int, 512)                   \
+                                                                               \
+    BENCHMARK_TYPE(histogram_sort_t, "using_sort", unsigned long long, 256)    \
+    BENCHMARK_TYPE(histogram_sort_t, "using_sort", unsigned long long, 320)    \
+                                                                               \
+    BENCHMARK_TYPE_128(histogram_sort_t, "using_sort", rocprim::int128_t, 256) \
+    BENCHMARK_TYPE_128(histogram_sort_t, "using_sort", rocprim::uint128_t, 256)
+
+int main(int argc, char* argv[])
+{
+    benchmark_utils::executor executor(argc, argv, 512 * benchmark_utils::MiB, 1, 0);
+
+#ifndef BENCHMARK_CONFIG_TUNING
+    using histogram_atomic_t = histogram<rocprim::block_histogram_algorithm::using_atomic>;
+    using histogram_sort_t   = histogram<rocprim::block_histogram_algorithm::using_sort>;
+
+    BENCHMARK_ATOMIC()
+    BENCHMARK_SORT()
+#endif
+
+    executor.run();
 }

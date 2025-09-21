@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,18 +23,19 @@
 #ifndef TEST_BLOCK_LOAD_STORE_KERNELS_HPP_
 #define TEST_BLOCK_LOAD_STORE_KERNELS_HPP_
 
-#include "rocprim/block/block_load.hpp"
-#include "rocprim/block/block_store.hpp"
+#include "../../common/utils_custom_type.hpp"
+
 #include "test_utils_types.hpp"
 
-#include <hip/hip_vector_types.h>
+#include <rocprim/block/block_load.hpp>
+#include <rocprim/block/block_store.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+#include <rocprim/types.hpp>
 
-#include <gtest/gtest.h>
+#include <cstddef>
+#include <stdint.h>
 
-#include <rocprim/rocprim.hpp>
-#include <type_traits>
-
-typedef ::testing::Types<
+using ClassParamsFirstPart = ::testing::Types<
     // block_load_direct
     class_params<int8_t,
                  rocprim::block_load_method::block_load_direct,
@@ -108,22 +109,22 @@ typedef ::testing::Types<
                  512U,
                  2>,
 
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_direct,
                  rocprim::block_store_method::block_store_direct,
                  64U,
                  1>,
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_direct,
                  rocprim::block_store_method::block_store_direct,
                  64U,
                  5>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_direct,
                  rocprim::block_store_method::block_store_direct,
                  256U,
                  1>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_direct,
                  rocprim::block_store_method::block_store_direct,
                  256U,
@@ -164,12 +165,9 @@ typedef ::testing::Types<
                  rocprim::block_load_method::block_load_vectorize,
                  rocprim::block_store_method::block_store_vectorize,
                  512U,
-                 4>
+                 4>>;
 
-    >
-    ClassParamsFirstPart;
-
-typedef ::testing::Types<
+using ClassParamsSecondPart = ::testing::Types<
 
     class_params<double,
                  rocprim::block_load_method::block_load_vectorize,
@@ -202,22 +200,22 @@ typedef ::testing::Types<
                  512U,
                  2>,
 
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_vectorize,
                  rocprim::block_store_method::block_store_vectorize,
                  64U,
                  1>,
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_vectorize,
                  rocprim::block_store_method::block_store_vectorize,
                  64U,
                  4>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_vectorize,
                  rocprim::block_store_method::block_store_vectorize,
                  256U,
                  1>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_vectorize,
                  rocprim::block_store_method::block_store_vectorize,
                  256U,
@@ -291,31 +289,30 @@ typedef ::testing::Types<
                  512U,
                  3>,
 
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_transpose,
                  rocprim::block_store_method::block_store_transpose,
                  64U,
                  1>,
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_transpose,
                  rocprim::block_store_method::block_store_transpose,
                  64U,
                  5>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_transpose,
                  rocprim::block_store_method::block_store_transpose,
                  256U,
                  1>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_transpose,
                  rocprim::block_store_method::block_store_transpose,
                  256U,
                  4>
 
-    >
-    ClassParamsSecondPart;
+    >;
 
-typedef ::testing::Types<
+using ClassParamsThirdPart = ::testing::Types<
     // block_load_striped
     class_params<int,
                  rocprim::block_load_method::block_load_striped,
@@ -389,22 +386,22 @@ typedef ::testing::Types<
                  512U,
                  2>,
 
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_striped,
                  rocprim::block_store_method::block_store_striped,
                  64U,
                  1>,
-    class_params<test_utils::custom_test_type<int>,
+    class_params<common::custom_type<int, int, true>,
                  rocprim::block_load_method::block_load_striped,
                  rocprim::block_store_method::block_store_striped,
                  64U,
                  5>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_striped,
                  rocprim::block_store_method::block_store_striped,
                  256U,
                  1>,
-    class_params<test_utils::custom_test_type<double>,
+    class_params<common::custom_type<double, double, true>,
                  rocprim::block_load_method::block_load_striped,
                  rocprim::block_store_method::block_store_striped,
                  256U,
@@ -422,58 +419,56 @@ typedef ::testing::Types<
                  64U,
                  4>
 
-    >
-    ClassParamsThirdPart;
+    >;
 
-typedef ::testing::Types<vector_params<int, int, 3, false>,
-                         vector_params<int, int4, 4, true>,
-                         vector_params<int, int, 7, false>,
-                         vector_params<int, int4, 8, true>,
-                         vector_params<int, int, 11, false>,
-                         vector_params<int, int4, 16, true>,
+using VectorParams = ::testing::Types<vector_params<int, int, 3, false>,
+                                      vector_params<int, int4, 4, true>,
+                                      vector_params<int, int, 7, false>,
+                                      vector_params<int, int4, 8, true>,
+                                      vector_params<int, int, 11, false>,
+                                      vector_params<int, int4, 16, true>,
 
-                         vector_params<char, char, 3, false>,
-                         vector_params<char, char4, 4, true>,
-                         vector_params<char, char, 7, false>,
-                         vector_params<char, char4, 8, true>,
-                         vector_params<char, char, 11, false>,
-                         vector_params<char, char4, 16, true>,
+                                      vector_params<char, char, 3, false>,
+                                      vector_params<char, char4, 4, true>,
+                                      vector_params<char, char, 7, false>,
+                                      vector_params<char, char4, 8, true>,
+                                      vector_params<char, char, 11, false>,
+                                      vector_params<char, char4, 16, true>,
 
-                         vector_params<short, short, 3, false>,
-                         vector_params<short, short4, 4, true>,
-                         vector_params<short, short, 7, false>,
-                         vector_params<short, short4, 8, true>,
-                         vector_params<short, short, 11, false>,
-                         vector_params<short, short4, 16, true>,
+                                      vector_params<short, short, 3, false>,
+                                      vector_params<short, short4, 4, true>,
+                                      vector_params<short, short, 7, false>,
+                                      vector_params<short, short4, 8, true>,
+                                      vector_params<short, short, 11, false>,
+                                      vector_params<short, short4, 16, true>,
 
-                         vector_params<float, int, 3, false>,
-                         vector_params<float, int4, 4, true>,
-                         vector_params<float, int, 7, false>,
-                         vector_params<float, int4, 8, true>,
-                         vector_params<float, int, 11, false>,
-                         vector_params<float, int4, 16, true>,
+                                      vector_params<float, int, 3, false>,
+                                      vector_params<float, int4, 4, true>,
+                                      vector_params<float, int, 7, false>,
+                                      vector_params<float, int4, 8, true>,
+                                      vector_params<float, int, 11, false>,
+                                      vector_params<float, int4, 16, true>,
 
-                         vector_params<int2, int2, 3, false>,
-                         vector_params<int2, int4, 4, true>,
-                         vector_params<int2, int2, 7, false>,
-                         vector_params<int2, int4, 8, true>,
-                         vector_params<int2, int2, 11, false>,
-                         vector_params<int2, int4, 16, true>,
+                                      vector_params<int2, int2, 3, false>,
+                                      vector_params<int2, int4, 4, true>,
+                                      vector_params<int2, int2, 7, false>,
+                                      vector_params<int2, int4, 8, true>,
+                                      vector_params<int2, int2, 11, false>,
+                                      vector_params<int2, int4, 16, true>,
 
-                         vector_params<float2, int2, 3, false>,
-                         vector_params<float2, int4, 4, true>,
-                         vector_params<float2, int2, 7, false>,
-                         vector_params<float2, int4, 8, true>,
-                         vector_params<float2, int2, 11, false>,
-                         vector_params<float2, int4, 16, true>,
+                                      vector_params<float2, int2, 3, false>,
+                                      vector_params<float2, int4, 4, true>,
+                                      vector_params<float2, int2, 7, false>,
+                                      vector_params<float2, int4, 8, true>,
+                                      vector_params<float2, int2, 11, false>,
+                                      vector_params<float2, int4, 16, true>,
 
-                         vector_params<char4, int, 3, false>,
-                         vector_params<char4, int4, 4, true>,
-                         vector_params<char4, int, 7, false>,
-                         vector_params<char4, int4, 8, true>,
-                         vector_params<char4, int, 11, false>,
-                         vector_params<char4, int4, 16, true>>
-    VectorParams;
+                                      vector_params<char4, int, 3, false>,
+                                      vector_params<char4, int4, 4, true>,
+                                      vector_params<char4, int, 7, false>,
+                                      vector_params<char4, int4, 8, true>,
+                                      vector_params<char4, int, 11, false>,
+                                      vector_params<char4, int4, 16, true>>;
 
 template<rocprim::block_load_method  LoadMethod,
          rocprim::block_store_method StoreMethod,

@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,9 @@
 
 #include "benchmark_utils.hpp"
 
+#include "../common/utils_data_generation.hpp"
+#include "../common/utils_device_ptr.hpp"
+
 // Google Benchmark
 #include <benchmark/benchmark.h>
 
@@ -32,15 +35,16 @@
 #include <hip/hip_runtime.h>
 
 // rocPRIM
+#include <rocprim/device/config_types.hpp>
 #include <rocprim/device/device_partial_sort.hpp>
+#include <rocprim/functional.hpp>
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
-#include <cstddef>
-
 template<typename Key = int, typename Config = rocprim::default_config>
-struct device_partial_sort_copy_benchmark : public config_autotune_interface
+struct device_partial_sort_copy_benchmark : public benchmark_utils::autotune_interface
 {
     bool small_n = false;
 
@@ -57,18 +61,16 @@ struct device_partial_sort_copy_benchmark : public config_autotune_interface
             + ",key_type:" + std::string(Traits<Key>::name()) + ",cfg:default_config}");
     }
 
-    static constexpr unsigned int batch_size  = 10;
-    static constexpr unsigned int warmup_size = 5;
-
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
         using key_type = Key;
 
-        // Calculate the number of elements 
-        size_t size = bytes / sizeof(key_type);
+        // Calculate the number of elements
+        size_t size   = bytes / sizeof(key_type);
         size_t middle = 10;
 
         if(!small_n)
@@ -79,92 +81,43 @@ struct device_partial_sort_copy_benchmark : public config_autotune_interface
         // Generate data
         std::vector<key_type> keys_input
             = get_random_data<key_type>(size,
-                                        generate_limits<key_type>::min(),
-                                        generate_limits<key_type>::max(),
+                                        common::generate_limits<key_type>::min(),
+                                        common::generate_limits<key_type>::max(),
                                         seed.get_0());
 
-        key_type* d_keys_input;
-        key_type* d_keys_output;
-        HIP_CHECK(hipMalloc(&d_keys_input, size * sizeof(*d_keys_input)));
-        HIP_CHECK(hipMalloc(&d_keys_output, size * sizeof(*d_keys_output)));
-
-        HIP_CHECK(hipMemcpy(d_keys_input,
-                            keys_input.data(),
-                            size * sizeof(*d_keys_input),
-                            hipMemcpyHostToDevice));
+        common::device_ptr<key_type> d_keys_input(keys_input);
+        common::device_ptr<key_type> d_keys_output(size);
 
         rocprim::less<key_type> lesser_op;
-        void*                   d_temporary_storage     = nullptr;
+        common::device_ptr<void> d_temporary_storage;
         size_t                  temporary_storage_bytes = 0;
-        HIP_CHECK(rocprim::partial_sort_copy(d_temporary_storage,
+        HIP_CHECK(rocprim::partial_sort_copy(d_temporary_storage.get(),
                                              temporary_storage_bytes,
-                                             d_keys_input,
-                                             d_keys_output,
+                                             d_keys_input.get(),
+                                             d_keys_output.get(),
                                              middle,
                                              size,
                                              lesser_op,
                                              stream,
                                              false));
 
-        HIP_CHECK(hipMalloc(&d_temporary_storage, temporary_storage_bytes));
+        d_temporary_storage.resize(temporary_storage_bytes);
 
-        // Warm-up
-        for(size_t i = 0; i < warmup_size; i++)
-        {
-            HIP_CHECK(rocprim::partial_sort_copy(d_temporary_storage,
-                                                 temporary_storage_bytes,
-                                                 d_keys_input,
-                                                 d_keys_output,
-                                                 middle,
-                                                 size,
-                                                 lesser_op,
-                                                 stream,
-                                                 false));
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-
-        // HIP events creation
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            // Record start event
-            HIP_CHECK(hipEventRecord(start, stream));
-
-            for(size_t i = 0; i < batch_size; i++)
+        state.run(
+            [&]
             {
-                HIP_CHECK(rocprim::partial_sort_copy(d_temporary_storage,
+                HIP_CHECK(rocprim::partial_sort_copy(d_temporary_storage.get(),
                                                      temporary_storage_bytes,
-                                                     d_keys_input,
-                                                     d_keys_output,
+                                                     d_keys_input.get(),
+                                                     d_keys_output.get(),
                                                      middle,
                                                      size,
                                                      lesser_op,
                                                      stream,
                                                      false));
-            }
+            });
 
-            // Record stop event and wait until it completes
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds;
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        // Destroy HIP events
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(*d_keys_input));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
-        HIP_CHECK(hipFree(d_temporary_storage));
-        HIP_CHECK(hipFree(d_keys_input));
-        HIP_CHECK(hipFree(d_keys_output));
+        state.set_throughput(size, sizeof(key_type));
     }
 };
 

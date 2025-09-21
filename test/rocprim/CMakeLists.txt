@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -32,6 +32,11 @@ endfunction()
 function(add_rocprim_test TEST_NAME TEST_SOURCES)
   get_rocprim_test_target(${TEST_SOURCES} TEST_TARGET)
   add_rocprim_test_internal(${TEST_NAME} "${TEST_SOURCES}" ${TEST_TARGET})
+  if(WITH_ROCRAND)
+    find_package(rocrand REQUIRED)
+    target_link_libraries(${TEST_TARGET} PRIVATE roc::rocrand) 
+    target_compile_definitions(${TEST_TARGET} PRIVATE WITH_ROCRAND)
+  endif() 
 endfunction()
 
 function(add_rocprim_test_internal TEST_NAME TEST_SOURCES TEST_TARGET)
@@ -73,6 +78,20 @@ function(add_rocprim_test_internal TEST_NAME TEST_SOURCES TEST_TARGET)
       >
       $<$<COMPILE_LANGUAGE:HIP>:$<$<HIP_COMPILER_ID:MSVC>:/bigobj>>
   )
+
+  function(add_rocprim_test_disable_dpp TEST_NAME TEST_SOURCES)
+    get_rocprim_test_target(${TEST_SOURCES} TEST_TARGET)
+    set(TEST_TARGET "${TEST_TARGET}_disable_dpp")
+    add_rocprim_test_internal("${TEST_NAME}_disable_dpp" "${TEST_SOURCES}" ${TEST_TARGET})
+    target_compile_definitions(${TEST_TARGET} PRIVATE ROCPRIM_DISABLE_DPP=1)
+  endfunction()
+
+  if(WIN32)
+    # Usage of 128-bit integral types (__int128_t and __uint128_t, whose alignment is 16 bytes)
+    # requires an extended alignment support. Otherwise, a static assert will be triggered in
+    # functions like std::stable_sort. _ENABLE_EXTENDED_ALIGNED_STORAGE turns it on:
+    target_compile_definitions(${TEST_TARGET} PRIVATE _ENABLE_EXTENDED_ALIGNED_STORAGE)
+  endif()
 
   set_target_properties(${TEST_TARGET}
     PROPERTIES
@@ -231,10 +250,6 @@ function(add_rocprim_cpp_standard_test STANDARD EXTENSIONS TARGET_SUFFIX TEST_NA
   endif()
 endfunction()
 
-function(add_rocprim_cpp17_test TEST_NAME TEST_SOURCES)
-  add_rocprim_cpp_standard_test(17 OFF "" ${TEST_NAME} ${TEST_SOURCES})
-endfunction()
-
 # ****************************************************************************
 # Tests
 # ****************************************************************************
@@ -252,6 +267,7 @@ if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_rocprim_test_parallel("rocprim.block_adjacent_difference" test_block_adjacent_difference.cpp.in)
   add_rocprim_test_parallel("rocprim.block_discontinuity" test_block_discontinuity.cpp.in)
 endif()
+add_rocprim_test("rocprim.bit_cast" test_bit_cast.cpp)
 add_rocprim_test("rocprim.block_exchange" test_block_exchange.cpp)
 add_rocprim_test("rocprim.block_histogram" test_block_histogram.cpp)
 add_rocprim_test("rocprim.block_load_store" test_block_load_store.cpp)
@@ -275,9 +291,10 @@ add_rocprim_test("rocprim.device_adjacent_find" test_device_adjacent_find.cpp)
 add_rocprim_test("rocprim.device_find_end" test_device_find_end.cpp)
 add_rocprim_test("rocprim.device_histogram" test_device_histogram.cpp)
 add_rocprim_test("rocprim.device_merge" test_device_merge.cpp)
+add_rocprim_test("rocprim.device_merge_inplace" test_device_merge_inplace.cpp)
 add_rocprim_test("rocprim.device_merge_sort" test_device_merge_sort.cpp)
-add_rocprim_cpp17_test("rocprim.nth_element" test_device_nth_element.cpp)
-add_rocprim_cpp17_test("rocprim.device_partial_sort" test_device_partial_sort.cpp)
+add_rocprim_test("rocprim.nth_element" test_device_nth_element.cpp)
+add_rocprim_test("rocprim.device_partial_sort" test_device_partial_sort.cpp)
 add_rocprim_test("rocprim.device_partition" test_device_partition.cpp)
 add_rocprim_test_parallel("rocprim.device_radix_sort" test_device_radix_sort.cpp.in)
 add_rocprim_test("rocprim.device_reduce_by_key" test_device_reduce_by_key.cpp)
@@ -296,12 +313,13 @@ add_rocprim_test("rocprim.lookback_reproducibility" test_lookback_reproducibilit
 add_rocprim_test("rocprim.radix_key_codec" test_radix_key_codec.cpp)
 add_rocprim_test("rocprim.predicate_iterator" test_predicate_iterator.cpp)
 add_rocprim_test("rocprim.reverse_iterator" test_reverse_iterator.cpp)
+add_rocprim_test("rocprim.rocprim_tuple" test_rocprim_tuple.cpp)
+add_rocprim_test("rocprim.rocprim_types" test_rocprim_types.cpp)
 add_rocprim_test("rocprim.texture_cache_iterator" test_texture_cache_iterator.cpp)
 add_rocprim_test("rocprim.thread" test_thread.cpp)
 add_rocprim_test("rocprim.thread_algos" test_thread_algos.cpp)
+add_rocprim_test("rocprim.utils_sort_checker" test_utils_sort_checker.cpp)
 add_rocprim_test("rocprim.transform_iterator" test_transform_iterator.cpp)
-add_rocprim_cpp_standard_test(14 OFF "_cpp14" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
-add_rocprim_cpp_standard_test(14 ON "_gnupp14" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
 add_rocprim_cpp_standard_test(17 OFF "_cpp17" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
 add_rocprim_cpp_standard_test(17 ON "_gnupp17" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
 add_rocprim_cpp_standard_test(20 OFF "_cpp20" "rocprim.type_traits_interface" test_type_traits_interface.cpp)
@@ -314,6 +332,99 @@ add_rocprim_test("rocprim.warp_exchange" test_warp_exchange.cpp)
 add_rocprim_test("rocprim.warp_load" test_warp_load.cpp)
 add_rocprim_test("rocprim.warp_reduce" test_warp_reduce.cpp)
 add_rocprim_test("rocprim.warp_scan" test_warp_scan.cpp)
+add_rocprim_test_disable_dpp("rocprim.warp_scan_disable_dpp" test_warp_scan.cpp)
 add_rocprim_test("rocprim.warp_sort" test_warp_sort.cpp)
 add_rocprim_test("rocprim.warp_store" test_warp_store.cpp)
 add_rocprim_test("rocprim.zip_iterator" test_zip_iterator.cpp)
+add_rocprim_test("rocprim.accumulator_t" test_accumulator_t.cpp)
+
+if(NOT WIN32)
+  # Linking tests check if all external rocPRIM symbols are in the inline namespace, kernel are not
+  # visible and if it is possible to link two libraries that use different rocPRIM versions.
+  # See comments in test_linking_new_scan.hpp for more details.
+
+  # For testing how the old behavior (without inline namespace) works set it to ON, the tests will
+  # fail
+  set(WITHOUT_INLINE_NAMESPACE OFF)
+
+  if(WITHOUT_INLINE_NAMESPACE)
+    set(COMMON_DEFINITIONS "ROCPRIM_DISABLE_INLINE_NAMESPACE")
+  endif()
+
+  add_library(test_linking_lib1 SHARED test_linking_lib.cpp)
+  if(ROCPRIM_INSTALL)
+    # Use a dummy export file to avoid adding the library to rocprim-targets.cmake
+    rocm_install(TARGETS test_linking_lib1 COMPONENT tests EXPORT rocprim-tests)
+  endif()
+  target_include_directories(test_linking_lib1 SYSTEM BEFORE
+    PRIVATE
+      $<BUILD_INTERFACE:${COMMON_TEST_HEADER_DIRECTORY}>
+      $<TARGET_PROPERTY:GTest::GTest,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(test_linking_lib1 PRIVATE rocprim_hip)
+  set_target_properties(test_linking_lib1
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test/rocprim"
+      COMPILE_DEFINITIONS "TEST_FUNC=test1;${COMMON_DEFINITIONS};"
+  )
+
+  add_library(test_linking_lib2 SHARED test_linking_lib.cpp)
+  if(ROCPRIM_INSTALL)
+    # Use a dummy export file to avoid adding the library to rocprim-targets.cmake
+    rocm_install(TARGETS test_linking_lib2 COMPONENT tests EXPORT rocprim-tests)
+  endif()
+  target_include_directories(test_linking_lib2 SYSTEM BEFORE
+    PRIVATE
+      $<BUILD_INTERFACE:${COMMON_TEST_HEADER_DIRECTORY}>
+      $<TARGET_PROPERTY:GTest::GTest,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(test_linking_lib2 PRIVATE rocprim_hip)
+  # Pretend that we build this library with another version of rocPRIM which uses another
+  # implementation of scan
+  if(NOT WITHOUT_INLINE_NAMESPACE)
+    set(LIB2_NAMESPACE_DEFINITION "ROCPRIM_INLINE_NAMESPACE=ROCPRIM_300201_NS")
+  endif()
+  set_target_properties(test_linking_lib2
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/test/rocprim"
+      COMPILE_DEFINITIONS "TEST_FUNC=test2;TEST_LINKING_EMULATE_ANOTHER_VERSION;${COMMON_DEFINITIONS};${LIB2_NAMESPACE_DEFINITION};"
+  )
+
+  add_rocprim_test_internal("rocprim.linking" "test_linking.cpp;test_linking_lib.cpp" test_linking)
+  target_link_libraries(test_linking PUBLIC test_linking_lib1 test_linking_lib2)
+  set_target_properties(test_linking
+    PROPERTIES
+      COMPILE_DEFINITIONS "TEST_FUNC=test0;${COMMON_DEFINITIONS};"
+  )
+
+  # Check what symbols are exported by the libraries and what their names are
+  # nm --demangle --defined-only --extern-only <library> is used to print
+  # the symbols that are exported from a library.
+
+  set(NM_ARGS --demangle --defined-only --extern-only)
+
+  # The tests fail if
+  #  * there are symbols in the rocprim namespace but not in the inline namespace with the
+  #    corresponding rocPRIM version;
+  #  * any kernels are visible (usually they have "kernel" in their names).
+  string(REPLACE ";" " " NM_ARGS_STR "${NM_ARGS}")
+  add_test(
+    NAME "rocprim.linking_lib1_symbols"
+    COMMAND sh -c "${CMAKE_NM} ${NM_ARGS_STR} $<TARGET_FILE:test_linking_lib1> | grep -c -P \"(rocprim::(?!ROCPRIM_${rocprim_VERSION_NUMBER}_NS))|kernel\""
+  )
+  add_test(
+    NAME "rocprim.linking_lib2_symbols"
+    COMMAND sh -c "${CMAKE_NM} ${NM_ARGS_STR} $<TARGET_FILE:test_linking_lib2> | grep -c -P \"(rocprim::(?!ROCPRIM_300201_NS))|kernel\""
+  )
+  add_test(
+    NAME "rocprim.linking_symbols"
+    COMMAND sh -c "${CMAKE_NM} ${NM_ARGS_STR} $<TARGET_FILE:test_linking> | grep -c -P \"(rocprim::(?!ROCPRIM_${rocprim_VERSION_NUMBER}_NS))|kernel\""
+  )
+  set_tests_properties(
+    "rocprim.linking_lib1_symbols"
+    "rocprim.linking_lib2_symbols"
+    "rocprim.linking_symbols"
+    PROPERTIES
+      PASS_REGULAR_EXPRESSION "^0" # no such symbols must be found (grep -c returns 0)
+  )
+endif()

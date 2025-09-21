@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,12 @@
 #ifndef ROCPRIM_INTRINSICS_WARP_HPP_
 #define ROCPRIM_INTRINSICS_WARP_HPP_
 
+#include "arch.hpp"
+
 #include "../config.hpp"
 #include "../types.hpp"
+
+#include <hip/device_functions.h>
 
 #include <type_traits>
 
@@ -35,7 +39,7 @@ BEGIN_ROCPRIM_NAMESPACE
 /// whose <tt>i</tt>-th bit is set if and only if \p predicate is <tt>true</tt>
 /// for the <tt>i</tt>-th thread of the warp and the <tt>i</tt>-th thread is active.
 ///
-/// \param predicate - input to be evaluated for all active lanes
+/// \param predicate input to be evaluated for all active lanes
 ROCPRIM_DEVICE ROCPRIM_INLINE
 lane_mask_type ballot(int predicate)
 {
@@ -50,12 +54,17 @@ ROCPRIM_DEVICE ROCPRIM_INLINE
 unsigned int masked_bit_count(lane_mask_type x, unsigned int add = 0)
 {
     int c;
-#if ROCPRIM_WAVEFRONT_SIZE == 32
-    c = ::__builtin_amdgcn_mbcnt_lo(x, add);
-#else
-    c = ::__builtin_amdgcn_mbcnt_lo(static_cast<int>(x), add);
-    c = ::__builtin_amdgcn_mbcnt_hi(static_cast<int>(x >> 32), c);
-#endif
+    c = ::__builtin_amdgcn_mbcnt_lo(static_cast<unsigned int>(x), add);
+    if constexpr(sizeof(lane_mask_type) == 8)
+    {
+        // SPIR-V: We assumed 64 threads per wave, but this might not
+        // be correct. Do an extra check to only do the upper half, when
+        // there actually is an upper half.
+        if(::rocprim::arch::wavefront::size() == ROCPRIM_WARP_SIZE_64)
+        {
+            c = ::__builtin_amdgcn_mbcnt_hi(static_cast<unsigned int>(x >> 32), c);
+        }
+    }
     return c;
 }
 
@@ -74,7 +83,7 @@ int warp_all(int predicate)
     return ::__all(predicate);
 }
 
-} // end detail namespace
+} // namespace detail
 
 /// \overload
 /// \brief Group active lanes having the same bits of \p label
@@ -93,9 +102,8 @@ int warp_all(int predicate)
 /// lane <tt>i</tt>'s result includes bit <tt>j</tt> in the lane mask if lane <tt>j</tt> is part
 /// of the same group as lane <tt>i</tt>, i.e. lane <tt>i</tt> and <tt>j</tt> called with the
 /// same value for label.
-ROCPRIM_DEVICE ROCPRIM_INLINE lane_mask_type match_any(unsigned int label,
-                                                       unsigned int label_bits,
-                                                       bool         valid = true)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+lane_mask_type match_any(unsigned int label, unsigned int label_bits, bool valid = true)
 {
     // Obtain a mask with the threads which are currently active.
     lane_mask_type peer_mask = ballot(valid);
@@ -144,7 +152,8 @@ ROCPRIM_DEVICE ROCPRIM_INLINE lane_mask_type match_any(unsigned int label,
 /// same value for label.
 
 template<unsigned int LabelBits>
-ROCPRIM_DEVICE ROCPRIM_INLINE lane_mask_type match_any(unsigned int label, bool valid = true)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+lane_mask_type match_any(unsigned int label, bool valid = true)
 {
     // Dispatch to runtime version
     return match_any(label, LabelBits, valid);
@@ -161,7 +170,8 @@ ROCPRIM_DEVICE ROCPRIM_INLINE lane_mask_type match_any(unsigned int label, bool 
 ///
 /// \pre The relation specified by \p mask must be symmetric and transitive, in other words: the groups
 /// should be consistent between threads.
-ROCPRIM_DEVICE ROCPRIM_INLINE bool group_elect(lane_mask_type mask)
+ROCPRIM_DEVICE ROCPRIM_INLINE
+bool group_elect(lane_mask_type mask)
 {
     const unsigned int prev_same_count = ::rocprim::masked_bit_count(mask);
     return prev_same_count == 0 && mask != 0;

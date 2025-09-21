@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -22,6 +22,21 @@
 
 #ifndef TEST_BLOCK_REDUCE_KERNELS_HPP_
 #define TEST_BLOCK_REDUCE_KERNELS_HPP_
+
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_device_ptr.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+
+#include <rocprim/block/block_reduce.hpp>
+#include <rocprim/functional.hpp>
+
+#include <cmath>
+#include <cstddef>
+#include <iostream>
+#include <vector>
 
 template<
     unsigned int BlockSize,
@@ -241,13 +256,13 @@ void test_block_reduce_input_arrays()
     SCOPED_TRACE(testing::Message() << "with size = " << size);
     SCOPED_TRACE(testing::Message() << "with grid_size = " << grid_size);
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> output = test_utils::get_random_data<T>(size, 0, 100, seed_value);
+        std::vector<T> output = test_utils::get_random_data_wrapped<T>(size, 0, 100, seed_value);
 
         // Output reduce results
         std::vector<T> output_reductions(size / block_size, T(0));
@@ -267,49 +282,26 @@ void test_block_reduce_input_arrays()
         }
 
         // Preparing device
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_output, output.size() * sizeof(T)));
-        T* device_output_reductions;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_output_reductions, output_reductions.size() * sizeof(T)));
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_output, output.data(),
-                output.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_output_reductions, output_reductions.data(),
-                output_reductions.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<T> device_output(output);
+        common::device_ptr<T> device_output_reductions(output_reductions);
 
         // Running kernel
         hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(reduce_array_kernel<block_size, items_per_thread, algorithm, T, binary_op_type>),
-            dim3(grid_size), dim3(block_size), 0, 0,
-            device_output, device_output_reductions
-        );
+            HIP_KERNEL_NAME(
+                reduce_array_kernel<block_size, items_per_thread, algorithm, T, binary_op_type>),
+            dim3(grid_size),
+            dim3(block_size),
+            0,
+            0,
+            device_output.get(),
+            device_output_reductions.get());
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output_reductions.data(), device_output_reductions,
-                output_reductions.size() * sizeof(T),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output_reductions = device_output_reductions.load();
 
         // Verifying results
         test_utils::assert_eq(output_reductions, expected_reductions);
-
-        HIP_CHECK(hipFree(device_output));
-        HIP_CHECK(hipFree(device_output_reductions));
     }
 
 }

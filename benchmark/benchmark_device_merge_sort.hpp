@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,8 @@
 
 #include "benchmark_utils.hpp"
 
+#include "../common/utils_data_generation.hpp"
+
 // Google Benchmark
 #include <benchmark/benchmark.h>
 
@@ -34,17 +36,16 @@
 // rocPRIM
 #include <rocprim/device/device_merge_sort.hpp>
 
-#include <string>
-#include <vector>
-
 #include <cstddef>
+#include <numeric>
+#include <string>
+#include <type_traits>
+#include <vector>
 
 namespace rp = rocprim;
 
-template<typename Key    = int,
-         typename Value  = rocprim::empty_type,
-         typename Config = rocprim::default_config>
-struct device_merge_sort_benchmark : public config_autotune_interface
+template<typename Key = int, typename Value = rp::empty_type, typename Config = rp::default_config>
+struct device_merge_sort_benchmark : public benchmark_utils::autotune_interface
 {
     std::string name() const override
     {
@@ -53,26 +54,24 @@ struct device_merge_sort_benchmark : public config_autotune_interface
             + ",value_type:" + std::string(Traits<Value>::name()) + ",cfg:default_config}");
     }
 
-    static constexpr unsigned int batch_size  = 10;
-    static constexpr unsigned int warmup_size = 5;
-
     // keys benchmark
     template<typename val = Value>
-    auto do_run(benchmark::State&   state,
-                size_t              bytes,
-                const managed_seed& seed,
-                hipStream_t         stream) const ->
-        typename std::enable_if<std::is_same<val, ::rocprim::empty_type>::value, void>::type
+    auto do_run(benchmark_utils::state&& state) const ->
+        typename std::enable_if<std::is_same<val, ::rp::empty_type>::value, void>::type
     {
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
         using key_type = Key;
 
-        // Calculate the number of elements 
+        // Calculate the number of elements
         size_t size = bytes / sizeof(key_type);
         // Generate data
         std::vector<key_type> keys_input
             = get_random_data<key_type>(size,
-                                        generate_limits<key_type>::min(),
-                                        generate_limits<key_type>::max(),
+                                        common::generate_limits<key_type>::min(),
+                                        common::generate_limits<key_type>::max(),
                                         seed.get_0());
 
         key_type* d_keys_input;
@@ -84,7 +83,7 @@ struct device_merge_sort_benchmark : public config_autotune_interface
                             size * sizeof(key_type),
                             hipMemcpyHostToDevice));
 
-        ::rocprim::less<key_type> lesser_op;
+        ::rp::less<key_type> lesser_op;
 
         void*  d_temporary_storage     = nullptr;
         size_t temporary_storage_bytes = 0;
@@ -100,31 +99,8 @@ struct device_merge_sort_benchmark : public config_autotune_interface
         HIP_CHECK(hipMalloc(&d_temporary_storage, temporary_storage_bytes));
         HIP_CHECK(hipDeviceSynchronize());
 
-        // Warm-up
-        for(size_t i = 0; i < warmup_size; i++)
-        {
-            HIP_CHECK(rp::merge_sort<Config>(d_temporary_storage,
-                                             temporary_storage_bytes,
-                                             d_keys_input,
-                                             d_keys_output,
-                                             size,
-                                             lesser_op,
-                                             stream,
-                                             false));
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-
-        // HIP events creation
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            // Record start event
-            HIP_CHECK(hipEventRecord(start, stream));
-
-            for(size_t i = 0; i < batch_size; i++)
+        state.run(
+            [&]
             {
                 HIP_CHECK(rp::merge_sort<Config>(d_temporary_storage,
                                                  temporary_storage_bytes,
@@ -134,24 +110,9 @@ struct device_merge_sort_benchmark : public config_autotune_interface
                                                  lesser_op,
                                                  stream,
                                                  false));
-            }
+            });
 
-            // Record stop event and wait until it completes
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds;
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        // Destroy HIP events
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size * sizeof(key_type));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
-
+        state.set_throughput(size, sizeof(key_type));
         HIP_CHECK(hipFree(d_temporary_storage));
         HIP_CHECK(hipFree(d_keys_input));
         HIP_CHECK(hipFree(d_keys_output));
@@ -159,26 +120,41 @@ struct device_merge_sort_benchmark : public config_autotune_interface
 
     // pairs benchmark
     template<typename val = Value>
-    auto do_run(benchmark::State&   state,
-                size_t              bytes,
-                const managed_seed& seed,
-                hipStream_t         stream) const ->
-        typename std::enable_if<!std::is_same<val, ::rocprim::empty_type>::value, void>::type
+    auto do_run(benchmark_utils::state&& state) const ->
+        typename std::enable_if<!std::is_same<val, ::rp::empty_type>::value, void>::type
     {
+        const auto& stream = state.stream;
+        const auto& bytes  = state.bytes;
+        const auto& seed   = state.seed;
+
         using key_type   = Key;
         using value_type = Value;
 
-        // Calculate the number of elements 
+        // Calculate the number of elements
         size_t size = bytes / sizeof(key_type);
         // Generate data
         std::vector<key_type> keys_input
             = get_random_data<key_type>(size,
-                                        generate_limits<key_type>::min(),
-                                        generate_limits<key_type>::max(),
+                                        common::generate_limits<key_type>::min(),
+                                        common::generate_limits<key_type>::max(),
                                         seed.get_0());
 
         std::vector<value_type> values_input(size);
-        std::iota(values_input.begin(), values_input.end(), 0);
+
+        if constexpr(common::is_custom_type_copyable<value_type>::value)
+        {
+            for(size_t i = 0; i < size; i++)
+            {
+                value_type value;
+                value.x         = static_cast<typename value_type::first_type>(i);
+                value.y         = static_cast<typename value_type::second_type>(i);
+                values_input[i] = value;
+            }
+        }
+        else
+        {
+            std::iota(values_input.begin(), values_input.end(), 0);
+        }
 
         key_type* d_keys_input;
         key_type* d_keys_output;
@@ -198,7 +174,7 @@ struct device_merge_sort_benchmark : public config_autotune_interface
                             size * sizeof(value_type),
                             hipMemcpyHostToDevice));
 
-        ::rocprim::less<key_type> lesser_op;
+        ::rp::less<key_type> lesser_op;
 
         void*  d_temporary_storage     = nullptr;
         size_t temporary_storage_bytes = 0;
@@ -216,33 +192,8 @@ struct device_merge_sort_benchmark : public config_autotune_interface
         HIP_CHECK(hipMalloc(&d_temporary_storage, temporary_storage_bytes));
         HIP_CHECK(hipDeviceSynchronize());
 
-        // Warm-up
-        for(size_t i = 0; i < warmup_size; i++)
-        {
-            HIP_CHECK(rp::merge_sort<Config>(d_temporary_storage,
-                                             temporary_storage_bytes,
-                                             d_keys_input,
-                                             d_keys_output,
-                                             d_values_input,
-                                             d_values_output,
-                                             size,
-                                             lesser_op,
-                                             stream,
-                                             false));
-        }
-        HIP_CHECK(hipDeviceSynchronize());
-
-        // HIP events creation
-        hipEvent_t start, stop;
-        HIP_CHECK(hipEventCreate(&start));
-        HIP_CHECK(hipEventCreate(&stop));
-
-        for(auto _ : state)
-        {
-            // Record start event
-            HIP_CHECK(hipEventRecord(start, stream));
-
-            for(size_t i = 0; i < batch_size; i++)
+        state.run(
+            [&]
             {
                 HIP_CHECK(rp::merge_sort<Config>(d_temporary_storage,
                                                  temporary_storage_bytes,
@@ -254,24 +205,9 @@ struct device_merge_sort_benchmark : public config_autotune_interface
                                                  lesser_op,
                                                  stream,
                                                  false));
-            }
+            });
 
-            // Record stop event and wait until it completes
-            HIP_CHECK(hipEventRecord(stop, stream));
-            HIP_CHECK(hipEventSynchronize(stop));
-
-            float elapsed_mseconds;
-            HIP_CHECK(hipEventElapsedTime(&elapsed_mseconds, start, stop));
-            state.SetIterationTime(elapsed_mseconds / 1000);
-        }
-
-        // Destroy HIP events
-        HIP_CHECK(hipEventDestroy(start));
-        HIP_CHECK(hipEventDestroy(stop));
-
-        state.SetBytesProcessed(state.iterations() * batch_size * size
-                                * (sizeof(key_type) + sizeof(value_type)));
-        state.SetItemsProcessed(state.iterations() * batch_size * size);
+        state.set_throughput(size, sizeof(key_type) + sizeof(value_type));
 
         HIP_CHECK(hipFree(d_temporary_storage));
         HIP_CHECK(hipFree(d_keys_input));
@@ -280,12 +216,9 @@ struct device_merge_sort_benchmark : public config_autotune_interface
         HIP_CHECK(hipFree(d_values_output));
     }
 
-    void run(benchmark::State&   state,
-             size_t              bytes,
-             const managed_seed& seed,
-             hipStream_t         stream) const override
+    void run(benchmark_utils::state&& state) override
     {
-        do_run(state, bytes, seed, stream);
+        do_run(std::forward<benchmark_utils::state>(state));
     }
 };
 

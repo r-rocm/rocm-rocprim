@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2021 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,8 @@
 // required rocprim headers
 #include <rocprim/warp/warp_scan.hpp>
 
+#include "../../common/utils_device_ptr.hpp"
+
 // required test headers
 #include "test_utils_types.hpp"
 
@@ -39,7 +41,9 @@ struct Integral;
 #define warp_params WarpParamsIntegral
 #define name_suffix Integral
 
-#include "test_warp_scan.hpp"
+#if !_CLANGD
+    #include "test_warp_scan.hpp"
+#endif
 
 #undef suite_name
 #undef warp_params
@@ -50,4 +54,6 @@ struct Floating;
 #define warp_params WarpParamsFloating
 #define name_suffix Floating
 
-#include "test_warp_scan.hpp"
+#if !_CLANGD
+    #include "test_warp_scan.hpp"
+#endif

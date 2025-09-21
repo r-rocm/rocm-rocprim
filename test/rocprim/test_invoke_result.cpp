@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -55,7 +55,7 @@ public:
     using expected_type = typename Params::expected_type;
 };
 
-typedef ::testing::Types<
+using RocprimInvokeResultBinOpTestsParams = ::testing::Types<
     RocprimTypeInvokeResultParams<uint16_t, rocprim::plus<uint16_t>>,
     RocprimTypeInvokeResultParams<int32_t, rocprim::plus<int32_t>>,
     RocprimTypeInvokeResultParams<float, rocprim::plus<float>>,
@@ -64,8 +64,7 @@ typedef ::testing::Types<
     RocprimTypeInvokeResultParams<rocprim::half, device_plus<rocprim::half>>,
     RocprimTypeInvokeResultParams<int32_t, rocprim::equal_to<int32_t>, bool>,
     RocprimTypeInvokeResultParams<rocprim::bfloat16, rocprim::equal_to<rocprim::bfloat16>, bool>,
-    RocprimTypeInvokeResultParams<rocprim::half, rocprim::equal_to<rocprim::half>, bool>>
-    RocprimInvokeResultBinOpTestsParams;
+    RocprimTypeInvokeResultParams<rocprim::half, rocprim::equal_to<rocprim::half>, bool>>;
 
 TYPED_TEST_SUITE(RocprimInvokeResultBinOpTests, RocprimInvokeResultBinOpTestsParams);
 
@@ -75,7 +74,7 @@ TYPED_TEST(RocprimInvokeResultBinOpTests, HostInvokeResult)
     using binary_function = typename TestFixture::function;
     using expected_type   = typename TestFixture::expected_type;
 
-    using resulting_type = rocprim::invoke_result_binary_op_t<input_type, binary_function>;
+    using resulting_type = ::rocprim::accumulator_t<binary_function, input_type>;
 
     // Compile and check on host
     static_assert(std::is_same<resulting_type, expected_type>::value,
@@ -100,13 +99,12 @@ public:
     using expected_type = typename Params::expected_type;
 };
 
-typedef ::testing::Types<
+using RocprimInvokeResultUnOpTestsParams = ::testing::Types<
     RocprimTypeInvokeResultParams<uint16_t, static_cast_op<uint16_t, float>, float>,
     RocprimTypeInvokeResultParams<double,
                                   static_cast_op<double, rocprim::bfloat16>,
                                   rocprim::bfloat16>,
-    RocprimTypeInvokeResultParams<uint8_t, rocprim::identity<uint8_t>>>
-    RocprimInvokeResultUnOpTestsParams;
+    RocprimTypeInvokeResultParams<uint8_t, rocprim::identity<uint8_t>>>;
 
 TYPED_TEST_SUITE(RocprimInvokeResultUnOpTests, RocprimInvokeResultUnOpTestsParams);
 

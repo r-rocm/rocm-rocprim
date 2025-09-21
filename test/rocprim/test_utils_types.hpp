@@ -1,4 +1,4 @@
-// Copyright (c) 2019-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2019-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,13 +21,15 @@
 #ifndef TEST_TEST_UTILS_TYPES_HPP_
 #define TEST_TEST_UTILS_TYPES_HPP_
 
-#include "rocprim/types.hpp"
-#include "test_utils.hpp"
+#include "../../common/utils_custom_type.hpp"
 
 // required rocprim headers
-#include <rocprim/config.hpp>
 #include <rocprim/block/block_load.hpp>
 #include <rocprim/block/block_store.hpp>
+#include <rocprim/types.hpp>
+
+#include <cstddef>
+#include <stdint.h>
 
 template<
     class T,
@@ -107,17 +109,13 @@ struct class_params
     block_params<input_type, output_type, 255U>
 // clang-format on
 
-typedef ::testing::Types<
-    warp_param_type(int),
-    warp_param_type(int8_t),
-    warp_param_type(uint8_t)
-> WarpParamsIntegral;
+using WarpParamsIntegral
+    = ::testing::Types<warp_param_type(int), warp_param_type(int8_t), warp_param_type(uint8_t)>;
 
-typedef ::testing::Types<warp_param_type(float),
-                         warp_param_type(double),
-                         warp_param_type(rocprim::half),
-                         warp_param_type(rocprim::bfloat16)>
-    WarpParamsFloating;
+using WarpParamsFloating = ::testing::Types<warp_param_type(float),
+                                            warp_param_type(double),
+                                            warp_param_type(rocprim::half),
+                                            warp_param_type(rocprim::bfloat16)>;
 
 // Separate sort params (only power of two warp sizes)
 #define warp_sort_param_type(type, items_per_thread) \
@@ -128,112 +126,104 @@ typedef ::testing::Types<warp_param_type(float),
    warp_params<type, 32U, items_per_thread>, \
    warp_params<type, 64U, items_per_thread>
 
-typedef ::testing::Types<
-    warp_sort_param_type(int, 1),
-    warp_sort_param_type(test_utils::custom_test_type<int>, 1),
-    warp_sort_param_type(uint8_t, 1),
-    warp_sort_param_type(int8_t, 1)
-> WarpSortParamsIntegral;
+using __custom_int2 = common::custom_type<int, int, true>;
 
-typedef ::testing::Types<warp_sort_param_type(float, 1),
-                         warp_sort_param_type(double, 1),
-                         warp_sort_param_type(rocprim::half, 1),
-                         warp_sort_param_type(rocprim::bfloat16, 1)>
-    WarpSortParamsFloating;
+using WarpSortParamsIntegral = ::testing::Types<warp_sort_param_type(int, 1),
+                                                warp_sort_param_type(__custom_int2, 1),
+                                                warp_sort_param_type(uint8_t, 1),
+                                                warp_sort_param_type(int8_t, 1)>;
 
-typedef ::testing::Types<
-    warp_sort_param_type(int, 2),
-    warp_sort_param_type(test_utils::custom_test_type<int>, 2),
-    warp_sort_param_type(uint8_t, 2),
-    warp_sort_param_type(int8_t, 2),
-    warp_sort_param_type(int, 4),
-    warp_sort_param_type(test_utils::custom_test_type<int>, 4),
-    warp_sort_param_type(uint8_t, 4),
-    warp_sort_param_type(int8_t, 4)
-> WarpSortParamsIntegralMultiThread;
+using WarpSortParamsFloating = ::testing::Types<warp_sort_param_type(float, 1),
+                                                warp_sort_param_type(double, 1),
+                                                warp_sort_param_type(rocprim::half, 1),
+                                                warp_sort_param_type(rocprim::bfloat16, 1)>;
 
-typedef ::testing::Types<
-    block_param_type(int, test_utils::custom_test_type<int>),
-    block_param_type(uint8_t, short),
-    block_param_type(int8_t, float)
-> BlockParamsIntegral;
+using WarpSortParamsIntegralMultiThread = ::testing::Types<warp_sort_param_type(int, 2),
+                                                           warp_sort_param_type(__custom_int2, 2),
+                                                           warp_sort_param_type(uint8_t, 2),
+                                                           warp_sort_param_type(int8_t, 2),
+                                                           warp_sort_param_type(int, 4),
+                                                           warp_sort_param_type(__custom_int2, 4),
+                                                           warp_sort_param_type(uint8_t, 4),
+                                                           warp_sort_param_type(int8_t, 4)>;
 
-typedef ::testing::Types<block_param_type(int, test_utils::custom_test_type<int>),
-                         block_param_type(uint8_t, short),
-                         block_param_type(int8_t, float),
-                         block_param_type(bool, rocprim::half)
+using BlockParamsIntegral = ::testing::Types<block_param_type(int, __custom_int2),
+                                             block_param_type(uint8_t, short),
+                                             block_param_type(int8_t, float)>;
+
+using BlockParamsIntegralExtended = ::testing::Types<block_param_type(int, __custom_int2),
+                                                     block_param_type(uint8_t, short),
+                                                     block_param_type(int8_t, float),
+                                                     block_param_type(bool, rocprim::half)
 #if ROCPRIM_HAS_INT128_SUPPORT
-                             ,
-                         block_param_type(rocprim::uint128_t, short),
-                         block_param_type(rocprim::int128_t, float)
+                                                         ,
+                                                     block_param_type(rocprim::uint128_t, short),
+                                                     block_param_type(rocprim::int128_t, float)
 #endif
-                         >
-    BlockParamsIntegralExtended;
+                                                     >;
 
-typedef ::testing::Types<block_param_type(float, long),
-                         block_param_type(double, test_utils::custom_test_type<double>),
-                         block_param_type(rocprim::half, int),
-                         block_param_type(rocprim::half, rocprim::half),
-                         block_param_type(rocprim::bfloat16, int),
-                         block_param_type(rocprim::bfloat16, rocprim::bfloat16)>
-    BlockParamsFloating;
+using __custom_double2 = common::custom_type<double, double, true>;
 
-typedef ::testing::Types<
-    block_param_type(test_utils::custom_test_type<int>, int),
-    block_param_type(uint8_t, bool),
-    block_param_type(int8_t, bool)
-> BlockDiscParamsIntegral;
+using BlockParamsFloating
+    = ::testing::Types<block_param_type(float, long),
+                       block_param_type(double, __custom_double2),
+                       block_param_type(rocprim::half, int),
+                       block_param_type(rocprim::half, rocprim::half),
+                       block_param_type(rocprim::bfloat16, int),
+                       block_param_type(rocprim::bfloat16, rocprim::bfloat16)>;
 
-typedef ::testing::Types<block_param_type(float, long), block_param_type(double, unsigned int)>
-    BlockDiscParamsFloating;
+using BlockDiscParamsIntegral = ::testing::Types<block_param_type(__custom_int2, int),
+                                                 block_param_type(uint8_t, bool),
+                                                 block_param_type(int8_t, bool)>;
 
-typedef ::testing::Types<block_param_type(rocprim::half, int),
-                         block_param_type(rocprim::half, rocprim::half),
-                         block_param_type(rocprim::bfloat16, int),
-                         block_param_type(rocprim::bfloat16, rocprim::bfloat16)>
-    BlockDiscParamsFloatingHalf;
+using BlockDiscParamsFloating
+    = ::testing::Types<block_param_type(float, long), block_param_type(double, unsigned int)>;
 
-typedef ::testing::Types<block_param_type(unsigned int, unsigned int),
-                         block_param_type(int8_t, unsigned int),
-                         block_param_type(uint8_t, unsigned int)>
-    BlockHistAtomicParamsIntegral;
+using BlockDiscParamsFloatingHalf
+    = ::testing::Types<block_param_type(rocprim::half, int),
+                       block_param_type(rocprim::half, rocprim::half),
+                       block_param_type(rocprim::bfloat16, int),
+                       block_param_type(rocprim::bfloat16, rocprim::bfloat16)>;
 
-typedef ::testing::Types<block_param_type(float, long),
-                         block_param_type(double, test_utils::custom_test_type<double>),
-                         block_param_type(double, int8_t),
-                         block_param_type(rocprim::half, rocprim::half),
-                         block_param_type(rocprim::half, int16_t),
-                         block_param_type(rocprim::bfloat16, rocprim::bfloat16)>
-    BlockExchParamsFloating;
+using BlockHistAtomicParamsIntegral = ::testing::Types<block_param_type(unsigned int, unsigned int),
+                                                       block_param_type(int8_t, unsigned int),
+                                                       block_param_type(uint8_t, unsigned int)>;
 
-typedef ::testing::Types<block_param_type(float, float),
-                         block_param_type(float, unsigned int),
-                         block_param_type(float, unsigned long long),
-                         block_param_type(double, float),
-                         block_param_type(double, unsigned long long),
-                         block_param_type(rocprim::half, float),
-                         block_param_type(rocprim::half, unsigned long long),
-                         block_param_type(rocprim::bfloat16, float),
-                         block_param_type(rocprim::bfloat16, unsigned long long)>
-    BlockHistAtomicParamsFloating;
+using BlockExchParamsFloating
+    = ::testing::Types<block_param_type(float, long),
+                       block_param_type(double, __custom_double2),
+                       block_param_type(double, int8_t),
+                       block_param_type(rocprim::half, rocprim::half),
+                       block_param_type(rocprim::half, int16_t),
+                       block_param_type(rocprim::bfloat16, rocprim::bfloat16)>;
 
-typedef ::testing::Types<block_param_type(int, uint8_t),
-                         block_param_type(short, uint8_t),
-                         block_param_type(uint8_t, uint8_t),
-                         block_param_type(int, int8_t),
-                         block_param_type(short, int8_t),
-                         block_param_type(int8_t, int8_t)>
-    BlockHistSortParamsIntegral;
+using BlockHistAtomicParamsFloating
+    = ::testing::Types<block_param_type(float, float),
+                       block_param_type(float, unsigned int),
+                       block_param_type(float, unsigned long long),
+                       block_param_type(double, float),
+                       block_param_type(double, unsigned long long),
+                       block_param_type(rocprim::half, float),
+                       block_param_type(rocprim::half, unsigned long long),
+                       block_param_type(rocprim::bfloat16, float),
+                       block_param_type(rocprim::bfloat16, unsigned long long)>;
 
-typedef ::testing::Types<block_param_type(float, unsigned short),
-                         block_param_type(float, unsigned int),
-                         block_param_type(double, unsigned short),
-                         block_param_type(double, unsigned int),
-                         block_param_type(rocprim::half, unsigned short),
-                         block_param_type(rocprim::half, unsigned int),
-                         block_param_type(rocprim::bfloat16, unsigned short),
-                         block_param_type(rocprim::bfloat16, unsigned int)>
-    BlockHistSortParamsFloating;
+using BlockHistSortParamsIntegral = ::testing::Types<block_param_type(int, uint8_t),
+                                                     block_param_type(short, uint8_t),
+                                                     block_param_type(uint8_t, uint8_t),
+                                                     block_param_type(int, int8_t),
+                                                     block_param_type(short, int8_t),
+                                                     block_param_type(int8_t, int8_t)>;
+
+using BlockHistSortParamsFloating
+    = ::testing::Types<block_param_type(float, unsigned short),
+                       block_param_type(float, unsigned int),
+                       block_param_type(double, unsigned short),
+                       block_param_type(double, unsigned int),
+                       block_param_type(rocprim::half, unsigned short),
+                       block_param_type(rocprim::half, unsigned int),
+                       block_param_type(rocprim::bfloat16, unsigned short),
+                       block_param_type(rocprim::bfloat16, unsigned int)>;
 
 static constexpr size_t n_items = 7;
 static constexpr unsigned int items[n_items] = {

@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,11 @@
 #ifndef ROCPRIM_DETAIL_VARIOUS_HPP_
 #define ROCPRIM_DETAIL_VARIOUS_HPP_
 
+#include <chrono>
+#include <iostream>
 #include <type_traits>
 
+#include "../common.hpp"
 #include "../config.hpp"
 #include "../functional.hpp"
 #include "../type_traits.hpp"
@@ -187,13 +190,14 @@ struct match_fundamental_type
         >::type;
 };
 
-// A storage-backing wrapper that allows types with non-trivial constructors to be aliased in unions
+// A storage-backing wrapper that allows types with non-trivial constructors to be aliased in unions.
+// Due to the reinterpret cast, it may in some cases be technically UB, but the generated code is usually
+// more performant than proper code.
 template<typename T>
-struct [[deprecated("To store non default-constructible types in local memory, use "
-                    "rocprim::uninitialized_array instead")]] raw_storage
+struct raw_storage
 {
     // Biggest memory-access word that T is a whole multiple of and is not larger than the alignment of T
-    typedef typename detail::match_fundamental_type<T>::type device_word;
+    using device_word = typename detail::match_fundamental_type<T>::type;
 
     // Backing storage
     alignas(device_word) unsigned char storage[sizeof(T)];
@@ -299,17 +303,7 @@ using bool_constant = std::integral_constant<bool, Value>;
 inline hipError_t memcpy_and_sync(
     void* dst, const void* src, size_t size_bytes, hipMemcpyKind kind, hipStream_t stream)
 {
-    // hipMemcpyWithStream is only supported on rocm 3.1 and above
-#if(HIP_VERSION_MAJOR == 3 && HIP_VERSION_MINOR >= 1) || HIP_VERSION_MAJOR > 3
     return hipMemcpyWithStream(dst, src, size_bytes, kind, stream);
-#else
-    const hipError_t result = hipMemcpyAsync(dst src, size_bytes, kind, stream);
-    if(hipSuccess != result)
-    {
-        return result;
-    }
-    return hipStreamSynchronize(stream);
-#endif
 }
 
 #if __cpp_lib_as_const >= 201510L
@@ -334,25 +328,6 @@ template<typename T>
 constexpr std::add_const_t<T>* as_const_ptr(T* ptr)
 {
     return ptr;
-}
-
-template<class Tuple, class Function, size_t... Indices>
-ROCPRIM_HOST_DEVICE inline void
-    for_each_in_tuple_impl(Tuple&& t, Function&& f, ::rocprim::index_sequence<Indices...>)
-{
-    int swallow[]
-        = {(std::forward<Function>(f)(::rocprim::get<Indices>(std::forward<Tuple>(t))), 0)...};
-    (void)swallow;
-}
-
-template<class Tuple, class Function>
-ROCPRIM_HOST_DEVICE inline auto for_each_in_tuple(Tuple&& t, Function&& f)
-    -> void_t<tuple_size<std::remove_reference_t<Tuple>>>
-{
-    static constexpr size_t size = tuple_size<std::remove_reference_t<Tuple>>::value;
-    for_each_in_tuple_impl(std::forward<Tuple>(t),
-                           std::forward<Function>(f),
-                           ::rocprim::make_index_sequence<size>());
 }
 
 /// \brief Reinterprets the pointer as another type and increments it to match the alignment of
@@ -402,22 +377,10 @@ ROCPRIM_HOST_DEVICE ROCPRIM_INLINE DstPtr cast_align_down(Src* pointer)
 }
 
 template<typename Destination, typename Source>
-ROCPRIM_HOST_DEVICE auto bit_cast(const Source& source)
-    -> std::enable_if_t<sizeof(Destination) == sizeof(Source)
-                            && std::is_trivially_copyable<Destination>::value
-                            && std::is_trivially_copyable<Source>::value,
-                        Destination>
+ROCPRIM_INLINE ROCPRIM_HOST_DEVICE
+auto bit_cast(const Source& source)
 {
-#if defined(__has_builtin) && __has_builtin(__builtin_bit_cast)
-    return __builtin_bit_cast(Destination, source);
-#else
-    static_assert(
-        std::is_trivially_constructable<Destination>::value,
-        "Fallback implementation of bit_cast requires Destination to be trivially constructible");
-    Destination dest;
-    memcpy(&dest, &source, sizeof(Destination));
-    return dest;
-#endif
+    return ::rocprim::traits::radix_key_codec::bit_cast<Destination, Source>(source);
 }
 
 template<typename... Ts>
@@ -438,6 +401,102 @@ struct select_max_by_value<T, U, Vs...>
 
 template<typename... Ts>
 using select_max_by_value_t = typename select_max_by_value<Ts...>::type;
+
+/// \brief Gets the maximum grid size to have all blocks active.
+template<typename Kernel>
+ROCPRIM_HOST
+hipError_t
+    grid_dim_for_max_active_blocks(int& grid_dim, int block_size, Kernel kernel, hipStream_t stream)
+{
+    hipDevice_t default_device;
+    ROCPRIM_RETURN_ON_ERROR(hipStreamGetDevice(0, &default_device));
+
+    hipDevice_t stream_device;
+    ROCPRIM_RETURN_ON_ERROR(hipStreamGetDevice(stream, &stream_device));
+
+    // after setting device, we can't just exit on non-success
+    hipError_t result = hipSetDevice(stream_device);
+
+    int occupancy;
+    if(result == hipSuccess)
+    {
+        result = hipOccupancyMaxActiveBlocksPerMultiprocessor(&occupancy, kernel, block_size, 0);
+
+        // workaround for when 'hipOccupancyMaxActiveBlocksPerMultiprocessor'
+        // outputs 0.
+        if(occupancy == 0)
+        {
+            std::cerr << "Could not get max active blocks per multiprocessor! "
+                         "Assuming '1'..."
+                      << std::endl;
+            occupancy = 1;
+        }
+    }
+
+    int num_multi_processors;
+    if(result == hipSuccess)
+    {
+        result = hipDeviceGetAttribute(&num_multi_processors,
+                                       hipDeviceAttribute_t::hipDeviceAttributeMultiprocessorCount,
+                                       stream_device);
+        // sanity check
+        if(num_multi_processors == 0)
+        {
+            result = hipErrorUnknown;
+        }
+    }
+
+    if(result == hipSuccess)
+    {
+        grid_dim = occupancy * num_multi_processors;
+    }
+
+    // always attempt to restore to default device
+    hipError_t set_result = hipSetDevice(default_device);
+    ROCPRIM_RETURN_ON_ERROR(result);
+
+    return set_result;
+}
+
+/// \brief Checks if the device on stream supports cooperative groups
+inline hipError_t supports_cooperative_groups(bool& has_support, hipStream_t stream)
+{
+    hipDevice_t stream_device;
+    hipError_t  result = hipStreamGetDevice(stream, &stream_device);
+    if(result != hipSuccess)
+    {
+        return result;
+    }
+
+    int value;
+    result = hipDeviceGetAttribute(&value,
+                                   hipDeviceAttribute_t::hipDeviceAttributeCooperativeLaunch,
+                                   stream_device);
+    if(result != hipSuccess)
+    {
+        return result;
+    }
+
+    has_support = value != 0;
+
+    return hipSuccess;
+}
+
+/// Computes the time difference between now and the passed time reference.
+/// Returns the time difference in milliseconds and updates the time reference
+/// with now.
+inline float update_time_point(std::chrono::high_resolution_clock::time_point& t_time)
+{
+    std::chrono::high_resolution_clock::time_point t_stop
+        = std::chrono::high_resolution_clock::now();
+
+    float delta_time
+        = std::chrono::duration_cast<std::chrono::duration<float, std::milli>>(t_stop - t_time)
+              .count();
+    t_time = t_stop;
+
+    return delta_time;
+}
 
 } // end namespace detail
 END_ROCPRIM_NAMESPACE

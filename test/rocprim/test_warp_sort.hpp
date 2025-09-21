@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2023 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -19,6 +19,24 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+
+#include "../common_test_header.hpp"
+
+#include "../../common/utils_custom_type.hpp"
+#include "../../common/utils_device_ptr.hpp"
+
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
+
+#include <rocprim/config.hpp>
+#include <rocprim/detail/various.hpp>
+#include <rocprim/device/config_types.hpp>
+#include <rocprim/functional.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <vector>
 
 test_suite_type_def(suite_name, name_suffix)
 
@@ -60,13 +78,13 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, Sort)
         GTEST_SKIP();
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> output = test_utils::get_random_data<T>(size, 0, 100, seed_value);
+        std::vector<T> output = test_utils::get_random_data_wrapped<T>(size, 0, 100, seed_value);
 
         // Calculate expected results on host
         std::vector<T> expected(output);
@@ -79,43 +97,24 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, Sort)
         }
 
         // Writing to device memory
-        T* d_output;
-        HIP_CHECK(
-            test_common_utils::hipMallocHelper(&d_output, output.size() * sizeof(typename decltype(output)::value_type))
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                d_output, output.data(),
-                output.size() * sizeof(typename decltype(output)::value_type),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<T> d_output(output);
 
         // Launching kernel
         hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(test_hip_warp_sort<
-                items_per_thread, block_size, logical_warp_size, T
-            >),
-            dim3(grid_size), dim3(block_size), 0, 0,
-            d_output
-        );
+            HIP_KERNEL_NAME(test_hip_warp_sort<items_per_thread, block_size, logical_warp_size, T>),
+            dim3(grid_size),
+            dim3(block_size),
+            0,
+            0,
+            d_output.get());
 
         HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipDeviceSynchronize());
 
         // Read from device memory
-        HIP_CHECK(
-            hipMemcpy(
-                output.data(), d_output,
-                output.size() * sizeof(typename decltype(output)::value_type),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output = d_output.load();
 
         test_utils::assert_eq(output, expected);
-
-        HIP_CHECK(hipFree(d_output));
     }
 
 }
@@ -128,7 +127,7 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, SortKeyInt)
 
     // logical warp side for warp primitive, execution warp size is always rocprim::warp_size()
     using T = typename TestFixture::params::type;
-    using pair = test_utils::custom_test_type<T>;
+    using pair = common::custom_type<T, T, true>;
 
     using value_op_type = rocprim::less<T>;
     using eq_op_type    = rocprim::equal_to<T>;
@@ -159,14 +158,16 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, SortKeyInt)
         GTEST_SKIP();
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
 
         // Generate data
-        std::vector<T> output_key = test_utils::get_random_data<T>(size, 0, 100, seed_value);
-        std::vector<T> output_value = test_utils::get_random_data<T>(size, 0, 100, seed_value);
+        std::vector<T> output_key
+            = test_utils::get_random_data_wrapped<T>(size, 0, 100, seed_value);
+        std::vector<T> output_value
+            = test_utils::get_random_data_wrapped<T>(size, 0, 100, seed_value);
 
         // Combine vectors to form pairs with key and value
         std::vector<pair> target(size);
@@ -185,59 +186,28 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, SortKeyInt)
         }
 
         // Writing to device memory
-        T* d_output_key;
-        T* d_output_value;
-        HIP_CHECK(
-            test_common_utils::hipMallocHelper(&d_output_key, output_key.size() * sizeof(typename decltype(output_key)::value_type))
-        );
-        HIP_CHECK(
-            test_common_utils::hipMallocHelper(&d_output_value, output_value.size() * sizeof(typename decltype(output_value)::value_type))
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                d_output_key, output_key.data(),
-                output_key.size() * sizeof(typename decltype(output_key)::value_type),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                d_output_value, output_value.data(),
-                output_value.size() * sizeof(typename decltype(output_value)::value_type),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<T> d_output_key(output_key);
+        common::device_ptr<T> d_output_value(output_value);
 
         // Launching kernel
-        hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(test_hip_sort_key_value_kernel<
-                items_per_thread, block_size, logical_warp_size, T, T
-            >),
-            dim3(grid_size), dim3(block_size), 0, 0,
-            d_output_key, d_output_value
-        );
+        hipLaunchKernelGGL(HIP_KERNEL_NAME(test_hip_sort_key_value_kernel<items_per_thread,
+                                                                          block_size,
+                                                                          logical_warp_size,
+                                                                          T,
+                                                                          T>),
+                           dim3(grid_size),
+                           dim3(block_size),
+                           0,
+                           0,
+                           d_output_key.get(),
+                           d_output_value.get());
 
         HIP_CHECK(hipGetLastError());
         HIP_CHECK(hipDeviceSynchronize());
 
         // Read from device memory
-        HIP_CHECK(
-            hipMemcpy(
-                output_key.data(), d_output_key,
-                output_key.size() * sizeof(typename decltype(output_key)::value_type),
-                hipMemcpyDeviceToHost
-            )
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                output_value.data(), d_output_value,
-                output_value.size() * sizeof(typename decltype(output_value)::value_type),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output_key   = d_output_key.load();
+        output_value = d_output_value.load();
 
         std::vector<T> expected_key(expected.size());
         std::vector<T> expected_value(expected.size());
@@ -262,9 +232,5 @@ typed_test_def(RocprimWarpSortShuffleBasedTests, name_suffix, SortKeyInt)
 
         test_utils::assert_eq(output_key, expected_key);
         test_utils::assert_eq(output_value, expected_value);
-
-        HIP_CHECK(hipFree(d_output_key));
-        HIP_CHECK(hipFree(d_output_value));
     }
-
 }

@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2017-2024 Advanced Micro Devices, Inc. All rights reserved.
+// Copyright (c) 2017-2025 Advanced Micro Devices, Inc. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -23,17 +23,25 @@
 #ifndef TEST_BLOCK_HISTOGRAM_KERNELS_HPP_
 #define TEST_BLOCK_HISTOGRAM_KERNELS_HPP_
 
-// required rocprim headers
-#include <rocprim/block/block_load.hpp>
-#include <rocprim/block/block_store.hpp>
-#include <rocprim/block/block_histogram.hpp>
+#include "../common_test_header.hpp"
 
 // required test headers
-#include "../common_test_header.hpp"
+#include "../../common/utils_device_ptr.hpp"
+#include "test_seed.hpp"
+#include "test_utils.hpp"
+#include "test_utils_assertions.hpp"
+#include "test_utils_data_generation.hpp"
 #include "test_utils_types.hpp"
 
-#include <algorithm>
-#include <limits>
+// required rocprim headers
+#include <rocprim/block/block_histogram.hpp>
+#include <rocprim/config.hpp>
+#include <rocprim/intrinsics/thread.hpp>
+#include <rocprim/type_traits.hpp>
+#include <rocprim/types.hpp>
+
+#include <type_traits>
+#include <vector>
 
 template<
     unsigned int BlockSize,
@@ -78,8 +86,7 @@ auto get_safe_maxval(size_t maxval) -> std::enable_if_t<rocprim::is_floating_poi
 {
     // Assert that the cast is defined behavior, based on the assumption that all floating-point
     //   types can be represented by a double
-    EXPECT_LT(static_cast<double>(maxval),
-              static_cast<double>(test_utils::numeric_limits<T>::max()));
+    EXPECT_LT(static_cast<double>(maxval), static_cast<double>(rocprim::numeric_limits<T>::max()));
     return static_cast<T>(maxval);
 }
 
@@ -126,7 +133,7 @@ void test_block_histogram_input_arrays()
         GTEST_SKIP() << "Temporary skipped test";
     }
 
-    for (size_t seed_index = 0; seed_index < random_seeds_count + seed_size; seed_index++)
+    for(size_t seed_index = 0; seed_index < number_of_runs; seed_index++)
     {
         unsigned int seed_value = seed_index < random_seeds_count  ? rand() : seeds[seed_index - random_seeds_count];
         SCOPED_TRACE(testing::Message() << "with seed = " << seed_value);
@@ -135,7 +142,10 @@ void test_block_histogram_input_arrays()
         // Generate data
         const size_t   max_value = bin - 1;
         std::vector<T> output
-            = test_utils::get_random_data<T>(size, 0, get_safe_maxval<T>(max_value), seed_value);
+            = test_utils::get_random_data_wrapped<T>(size,
+                                                     0,
+                                                     get_safe_maxval<T>(max_value),
+                                                     seed_value);
 
         // Output histogram results
         std::vector<BinType> output_bin(bin_sizes, 0);
@@ -153,50 +163,26 @@ void test_block_histogram_input_arrays()
         }
 
         // Preparing device
-        T* device_output;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_output, output.size() * sizeof(T)));
-        BinType* device_output_bin;
-        HIP_CHECK(test_common_utils::hipMallocHelper(&device_output_bin, output_bin.size() * sizeof(BinType)));
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_output, output.data(),
-                output.size() * sizeof(T),
-                hipMemcpyHostToDevice
-            )
-        );
-
-        HIP_CHECK(
-            hipMemcpy(
-                device_output_bin, output_bin.data(),
-                output_bin.size() * sizeof(BinType),
-                hipMemcpyHostToDevice
-            )
-        );
+        common::device_ptr<T>       device_output(output);
+        common::device_ptr<BinType> device_output_bin(output_bin);
 
         // Running kernel
         hipLaunchKernelGGL(
-            HIP_KERNEL_NAME(histogram_kernel<block_size, items_per_thread, bin, algorithm, T, BinType>),
-            dim3(grid_size), dim3(block_size), 0, 0,
-            device_output, device_output_bin
-        );
+            HIP_KERNEL_NAME(
+                histogram_kernel<block_size, items_per_thread, bin, algorithm, T, BinType>),
+            dim3(grid_size),
+            dim3(block_size),
+            0,
+            0,
+            device_output.get(),
+            device_output_bin.get());
         HIP_CHECK(hipGetLastError());
 
         // Reading results back
-        HIP_CHECK(
-            hipMemcpy(
-                output_bin.data(), device_output_bin,
-                output_bin.size() * sizeof(BinType),
-                hipMemcpyDeviceToHost
-            )
-        );
+        output_bin = device_output_bin.load();
 
         test_utils::assert_eq(output_bin, expected_bin);
-
-        HIP_CHECK(hipFree(device_output));
-        HIP_CHECK(hipFree(device_output_bin));
     }
-
 }
 
 // Static for-loop
