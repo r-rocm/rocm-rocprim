@@ -1,3 +1,9 @@
+rocm-rocprim (7.0.1-1) trixie; urgency=medium
+
+  * Release 7.0.1-1
+
+ -- CHEN Xuan <chenxuan@iscas.ac.cn>  Sun, 21 Sep 2025 17:49:38 +0800
+
 rocm-rocprim (6.4.3-1) trixie; urgency=medium
 
   * Release 6.4.3-1
